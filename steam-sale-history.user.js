@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam Inventory Sale History
 // @namespace    joey.steam-tools
-// @version      3.1.0
+// @version      3.2.0
 // @description  Sale history above the inventory grid. Each card opens priced at its 30-day held high (outliers set aside), so selling is two clicks: card, List. Chart, clickable sales-by-price bars, price chips, list-all, auto-advance, keyboard and tile price badges.
 // @author       Joey
 // @homepageURL  https://github.com/Joyariyb/steam-sale-history
@@ -192,6 +192,14 @@
     return m ? parseMoney(m[1]) : null;
   }
 
+  // Steam's own "This item is worth: 10 Gems" line in the item panel.
+  function parseGems(text) {
+    const m = /worth:\s*(\d[\d,.\s]*)\s*Gems?/i.exec(text || '');
+    if (!m) return null;
+    const n = parseInt(m[1].replace(/\D/g, ''), 10);
+    return isFinite(n) && n > 0 ? n : null;
+  }
+
   // Steam's fee arithmetic. w = {pct, min, base, pub}; amounts in cents.
   function amountToSend(received, w) {
     const steam = Math.floor(Math.max(received * w.pct, w.min)) + w.base;
@@ -248,7 +256,7 @@
   const HIST_H = 76;
   const STALE_DAYS = 10;
   const LIST_GAP = 400;
-  const BLUE = '#66c0f4', AMBER = '#e9b84a', GREY = '#8f98a0', LIGHT = '#c6d4df', SLATE = '#56616b';
+  const BLUE = '#66c0f4', AMBER = '#e9b84a', VIOLET = '#b9a3e3', GREY = '#8f98a0', LIGHT = '#c6d4df', SLATE = '#56616b';
 
   // Pricing rules, each kept in localStorage: [key, default].
   const RULES = {
@@ -309,6 +317,8 @@
                  color: ${AMBER}; font: 24px "Motiva Sans", Arial, sans-serif; -moz-appearance: textfield; appearance: textfield; }
     .ssh-price:hover, .ssh-price:focus { border-bottom-color: ${AMBER}; outline: none; }
     .ssh-price::-webkit-outer-spin-button, .ssh-price::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+    .ssh-gems { display: inline-flex; align-items: center; gap: 5px; margin-top: 3px; padding: 0 8px 0 6px; border: 1px solid #4b3f72;
+                border-radius: 9px; background: rgba(169,140,232,.1); color: ${VIOLET}; line-height: 16px; white-space: nowrap; }
     .ssh-why { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 1px; }
     .ssh-why-t { color: #fff; font-size: 12px; }
     .ssh-why-t a { color: ${BLUE}; font-size: 11px; margin-left: 6px; }
@@ -481,8 +491,14 @@
     return v != null ? v : parseStartingAt(panel.innerText || panel.textContent);
   }
 
+  // Gem value, read from the text Steam shows. innerText only: it leaves out the
+  // hidden block a reused panel still holds from an earlier item.
+  function panelGems(panel) {
+    return panel ? parseGems(panel.innerText) : null;
+  }
+
   // One shared panel, mounted above the grid.
-  const S = { key: null, item: null, panel: null, data: null, points: [], p30: [], lowest: null, ask: MIN_ASK, manual: false,
+  const S = { key: null, item: null, panel: null, data: null, points: [], p30: [], lowest: null, gems: null, ask: MIN_ASK, manual: false,
               why: null, held30: null, held7: null, heldRecent: null, med30: null, raw30: null, cut: 0, left: 0, chipCents: [], rail: null,
               hover: -1, drag: false, scale: null, view: [], controller: null, suppressClick: false };
   let box = null;
@@ -602,7 +618,10 @@
       '<div class="ssh-rules"></div>' +
       '<div class="ssh-hero ssh-d">' +
       '<div class="ssh-ask"><div class="ssh-lbl">ASK · BUYER PAYS</div><div class="ssh-askrow"><span class="ssh-pre"></span>' +
-      '<input class="ssh-price" type="number" step="0.01" min="0.03" aria-label="Asking price"><span class="ssh-suf"></span></div></div>' +
+      '<input class="ssh-price" type="number" step="0.01" min="0.03" aria-label="Asking price"><span class="ssh-suf"></span></div>' +
+      '<div class="ssh-gems" style="display:none" title="What Steam gives if you turn this item into gems">' +
+      '<svg aria-hidden="true" width="10" height="10" viewBox="0 0 10 10"><path d="M5 .8 9.2 4 5 9.2 .8 4Z" fill="rgba(185,163,227,.25)" ' +
+      'stroke="#b9a3e3" stroke-linejoin="round"/><path d="M.8 4H9.2" stroke="#b9a3e3" stroke-width=".8"/></svg><span></span></div></div>' +
       '<div class="ssh-why"><div class="ssh-why-t"></div><div class="ssh-why-d"></div><div class="ssh-why-o"></div>' +
       '<div class="ssh-why-w ssh-warn"></div></div>' +
       '<div class="ssh-do"><a class="ssh-list ssh-f-list"><b></b><i></i></a><a class="ssh-all"></a></div></div>' +
@@ -760,6 +779,7 @@
       S.panel = panel;
       const left = copiesOf(item).length;
       if (left !== S.left) { S.left = left; drawButtons(); }
+      refreshGems();
       refreshLowest();
       return;
     }
@@ -775,6 +795,8 @@
     S.manual = false;
     S.left = copiesOf(item).length;
     S.lowest = panelLowest(panel);
+    S.gems = panelGems(panel);
+    drawGems();
     setName(item.name);
     box.querySelector('.ssh-market').href = item.url;
     if (S.controller) S.controller.abort();
@@ -825,6 +847,21 @@
     S.manual = false;
     applyDefault();
     redrawPrice();
+  }
+
+  function drawGems() {
+    const el = box && box.querySelector('.ssh-gems');
+    if (!el) return;
+    el.style.display = S.gems ? '' : 'none';
+    el.lastChild.textContent = S.gems ? `${S.gems} ${S.gems === 1 ? 'gem' : 'gems'}` : '';
+  }
+
+  // Steam fills the gem value in a moment after the panel opens, like "Starting at".
+  function refreshGems() {
+    const v = panelGems(S.panel);
+    if (v === S.gems) return;
+    S.gems = v;
+    drawGems();
   }
 
   // Steam fills "Starting at" a moment after the panel opens; pick it up when it lands.

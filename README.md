@@ -24,6 +24,8 @@ versions on its own.
 - **The ask**: the price the card opens on, with the reason beside it: how many units sold at or
   above it, on how many days, and when last. Type over it, or change it with a chip, a bar, or
   the chart. "reset" goes back to the default.
+- **Gem value**: a small violet tag under the ask, read from the "This item is worth" line in
+  Steam's own item panel, so you can weigh selling against turning the card into gems.
 - **List**: posts the listing to Steam at the ask and names what you receive after fees. Steam
   still asks you to confirm in its mobile app. With more than one copy, **List all** lists every
   copy on the loaded pages, one request at a time.

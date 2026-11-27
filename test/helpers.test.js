@@ -8,7 +8,7 @@ const end = src.indexOf('// --- end helpers ---');
 assert(start > 0 && end > start, 'helper markers present');
 const names = ['parseSteamDate', 'toPoints', 'inRange', 'median', 'periodStats', 'niceBinWidth', 'priceBins',
   'shareAtOrAbove', 'parseMoney', 'parseStartingAt', 'amountToSend', 'receivedForBuyerPays', 'money', 'fmtRate',
-  'fmtTrend', 'nearestIndex', 'DAY', 'MIN_ASK', 'heldHigh', 'soldAtOrAbove', 'pickAsk', 'fmtAgo'];
+  'fmtTrend', 'nearestIndex', 'DAY', 'MIN_ASK', 'heldHigh', 'soldAtOrAbove', 'pickAsk', 'fmtAgo', 'parseGems'];
 const h = new Function(src.slice(start, end) + '\nreturn { ' + names.join(', ') + ' };')();
 const near = (a, b) => Math.abs(a - b) < 1e-9;
 
@@ -87,6 +87,13 @@ assert.strictEqual(h.parseMoney('Starting at:'), null);
 assert(near(h.parseStartingAt('Starting at: A$ 0.07\nVolume: 234 sold in the last 24 hours'), 0.07));
 assert(near(h.parseStartingAt('Starting at: 0,07€'), 0.07));
 assert.strictEqual(h.parseStartingAt('View in Community Market'), null);
+
+// Gem value line.
+assert.strictEqual(h.parseGems('This item is worth: 10 Gems\nTurn into Gems...'), 10);
+assert.strictEqual(h.parseGems('This item is worth:  1 Gem'), 1);
+assert.strictEqual(h.parseGems('This item is worth: 1,200 Gems'), 1200);
+assert.strictEqual(h.parseGems('Starting at: A$ 0.07'), null);
+assert.strictEqual(h.parseGems(null), null);
 
 // Steam's fees: buyer pays 0.08, seller gets 0.06; the floor is 0.03 for 0.01.
 const w = { pct: 0.05, min: 1, base: 0, pub: 0.10 };
