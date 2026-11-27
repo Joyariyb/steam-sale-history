@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam Inventory Sale History
 // @namespace    joey.steam-tools
-// @version      3.2.0
+// @version      3.2.1
 // @description  Sale history above the inventory grid. Each card opens priced at its 30-day held high (outliers set aside), so selling is two clicks: card, List. Chart, clickable sales-by-price bars, price chips, list-all, auto-advance, keyboard and tile price badges.
 // @author       Joey
 // @homepageURL  https://github.com/Joyariyb/steam-sale-history
@@ -313,9 +313,10 @@
     .ssh-ask { flex: none; }
     .ssh-lbl { font-size: 10px; letter-spacing: .06em; }
     .ssh-askrow { display: flex; align-items: baseline; color: ${AMBER}; font-size: 24px; line-height: 32px; white-space: nowrap; }
-    .ssh-price { width: 82px; height: 32px; padding: 0 2px; background: transparent; border: 0; border-bottom: 1px solid transparent;
+    .ssh-box input.ssh-price { width: 4.6ch; height: 32px; padding: 0 2px !important; background: transparent !important; border: 0 !important;
+                 border-bottom: 1px solid transparent !important; border-radius: 0 !important; box-shadow: none !important; margin: 0;
                  color: ${AMBER}; font: 24px "Motiva Sans", Arial, sans-serif; -moz-appearance: textfield; appearance: textfield; }
-    .ssh-price:hover, .ssh-price:focus { border-bottom-color: ${AMBER}; outline: none; }
+    .ssh-box input.ssh-price:hover, .ssh-box input.ssh-price:focus { border-bottom-color: ${AMBER} !important; outline: none; }
     .ssh-price::-webkit-outer-spin-button, .ssh-price::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
     .ssh-gems { display: inline-flex; align-items: center; gap: 5px; margin-top: 3px; padding: 0 8px 0 6px; border: 1px solid #4b3f72;
                 border-radius: 9px; background: rgba(169,140,232,.1); color: ${VIOLET}; line-height: 16px; white-space: nowrap; }
@@ -323,6 +324,9 @@
     .ssh-why-t { color: #fff; font-size: 12px; }
     .ssh-why-t a { color: ${BLUE}; font-size: 11px; margin-left: 6px; }
     .ssh-why-d { color: #a9b4bd; }
+    .ssh-box.narrow .ssh-hero { flex-wrap: wrap; row-gap: 8px; }
+    .ssh-box.narrow .ssh-ask { flex: 1; }
+    .ssh-box.narrow .ssh-why { order: 3; flex: none; width: 100%; }
     .ssh-do { flex: none; width: 160px; display: flex; flex-direction: column; justify-content: center; gap: 4px; }
     .ssh-list { display: block; box-sizing: border-box; border-radius: 3px; background: #75b022; color: #10202b; text-align: center;
                 white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -591,8 +595,9 @@
       box.style.left = (r.left - 12 - w) + 'px';
       box.style.top = top + 'px';
       box.style.maxHeight = `calc(100vh - ${top + 8}px)`;
+      box.classList.toggle('narrow', w < 500);
     } else if (box.classList.contains('dock') || !box.parentElement) {
-      box.classList.remove('dock');
+      box.classList.remove('dock', 'narrow');
       box.style.width = box.style.left = box.style.top = box.style.maxHeight = '';
       mountBox(box);
     }
@@ -915,10 +920,10 @@
     const wrap = box && box.querySelector('.ssh-chips');
     if (!wrap || !S.data) return;
     wrap.textContent = '';
-    const defs = [['Cheapest listing', S.lowest], ['30d median', S.med30], ['7d high', S.held7], ['Held high', S.held30],
-                  ['Raw high', S.raw30]];
+    const defs = [['Cheapest', S.lowest, 'Cheapest listing'], ['30d median', S.med30], ['7d high', S.held7],
+                  ['Held high', S.held30], ['Raw high', S.raw30]];
     S.chipCents = [];
-    defs.forEach(([label, val], n) => {
+    defs.forEach(([label, val, full], n) => {
       const a = document.createElement('a');
       a.className = 'ssh-chip';
       const i = document.createElement('i');
@@ -928,8 +933,8 @@
       if (val != null) {
         const cents = Math.max(MIN_ASK, Math.round(val * 100));
         a.dataset.cents = String(cents);
-        a.dataset.label = label;
-        a.title = `Key ${n + 1}`;
+        a.dataset.label = full || label;
+        a.title = `${full || label} · key ${n + 1}`;
         a.addEventListener('click', e => { e.preventDefault(); setAsk(cents); });
         S.chipCents.push(cents);
       } else {
@@ -1032,6 +1037,7 @@
     if (!box.classList.contains('open')) return;
     const input = box.querySelector('.ssh-price');
     if (document.activeElement !== input) input.value = (S.ask / 100).toFixed(2);
+    input.style.width = (Math.max(4, input.value.length) + 0.6) + 'ch';
     const t = box.querySelector('.ssh-why-t');
     t.textContent = r.title;
     if (S.manual) {
@@ -1591,7 +1597,8 @@
     new MutationObserver(() => {
       clearTimeout(timer);
       timer = setTimeout(() => update(panel), 150);
-    }).observe(panel, { childList: true, subtree: true });
+    // Attributes too: Steam fills some blocks while they are hidden and only then shows them.
+    }).observe(panel, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class'] });
   }
 
   function init() {
