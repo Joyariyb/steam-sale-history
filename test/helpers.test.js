@@ -8,7 +8,7 @@ const end = src.indexOf('// --- end helpers ---');
 assert(start > 0 && end > start, 'helper markers present');
 const names = ['parseSteamDate', 'toPoints', 'inRange', 'median', 'periodStats', 'niceBinWidth', 'priceBins',
   'shareAtOrAbove', 'parseMoney', 'parseStartingAt', 'amountToSend', 'receivedForBuyerPays', 'money', 'fmtRate',
-  'fmtTrend', 'nearestIndex', 'DAY'];
+  'fmtTrend', 'nearestIndex', 'DAY', 'MIN_ASK', 'heldHigh', 'soldAtOrAbove', 'pickAsk', 'fmtAgo'];
 const h = new Function(src.slice(start, end) + '\nreturn { ' + names.join(', ') + ' };')();
 const near = (a, b) => Math.abs(a - b) < 1e-9;
 
@@ -106,6 +106,49 @@ assert.strictEqual(h.fmtRate(0.333), '0.33');
 assert.strictEqual(h.fmtTrend(0.123), '+12%');
 assert.strictEqual(h.fmtTrend(-0.05), '-5%');
 assert.strictEqual(h.fmtTrend(null), '');
+
+// Held high: a busy card, 10 units a day at 0.10 for 30 days, two days at 0.13, one lone sale at 0.31.
+const busy = [];
+for (let d = 29; d >= 0; d--) busy.push({ t: now - (d + 0.5) * h.DAY, p: d === 5 || d === 6 ? 0.13 : 0.10, v: 10 });
+busy.push({ t: now - 12 * h.DAY, p: 0.31, v: 1 });
+assert(near(h.heldHigh(busy, 0.05), 0.13));
+// A stricter trim needs more units than the two good days hold, so it falls to the everyday price.
+assert(near(h.heldHigh(busy, 0.10), 0.10));
+// A surge that lasted one day does not count until a second day joins it.
+const surge = busy.concat([{ t: now - 20 * h.DAY, p: 0.20, v: 40 }]);
+assert(near(h.heldHigh(surge, 0.05), 0.13));
+// Thin markets: never fewer than three units, so the single spike is left out.
+const thin = [0.60, 0.70, 0.90, 0.80, 1.80].map((p, i) => ({ t: now - (i * 3 + 1) * h.DAY, p, v: 1 }));
+assert(near(h.heldHigh(thin, 0.05), 0.80));
+assert.strictEqual(h.heldHigh([], 0.05), null);
+assert.strictEqual(h.heldHigh([{ t: now, p: 0.05, v: 0 }], 0.05), null);
+assert(near(h.heldHigh([{ t: now, p: 0.07, v: 1 }], 0.05), 0.07));
+
+// What sold at or above a price.
+const ev = h.soldAtOrAbove(busy, 0.13);
+assert.strictEqual(ev.units, 21);
+assert.strictEqual(ev.days, 3);
+assert.strictEqual(ev.total, 301);
+assert.strictEqual(ev.last, now - 5.5 * h.DAY);
+assert.strictEqual(h.soldAtOrAbove(busy, 0.50).units, 0);
+assert.strictEqual(h.soldAtOrAbove(busy, 0.50).last, null);
+
+// The opening price: held high by default, one cent under the cheapest listing when the market is above it.
+assert.deepStrictEqual(h.pickAsk({ source: 'held30', held30: 0.13, held7: 0.11, lowest: 0.10, undercut: true }), { cents: 13, why: 'held30' });
+assert.deepStrictEqual(h.pickAsk({ source: 'held7', held30: 0.13, held7: 0.11, lowest: 0.10, undercut: true }), { cents: 11, why: 'held7' });
+assert.deepStrictEqual(h.pickAsk({ source: 'lowest', held30: 0.13, held7: 0.11, lowest: 0.10, undercut: true }), { cents: 10, why: 'lowest' });
+assert.deepStrictEqual(h.pickAsk({ source: 'held30', held30: 0.09, lowest: 0.12, undercut: true }), { cents: 11, why: 'undercut' });
+assert.deepStrictEqual(h.pickAsk({ source: 'held30', held30: 0.09, lowest: 0.12, undercut: false }), { cents: 9, why: 'held30' });
+assert.deepStrictEqual(h.pickAsk({ source: 'held30', held30: 0.09, lowest: 0.10, undercut: true }), { cents: 9, why: 'held30' });
+assert.deepStrictEqual(h.pickAsk({ source: 'lowest', held30: 0.09, lowest: null, undercut: true }), { cents: 9, why: 'held30' });
+assert.deepStrictEqual(h.pickAsk({ source: 'held30', held30: null, lowest: 0.08 }), { cents: 8, why: 'lowest' });
+assert.deepStrictEqual(h.pickAsk({ source: 'held30', held30: null, lowest: null, median: null, last: 0.06 }), { cents: 6, why: 'last' });
+assert.deepStrictEqual(h.pickAsk({ source: 'held30' }), { cents: h.MIN_ASK, why: 'floor' });
+assert.deepStrictEqual(h.pickAsk({ source: 'held30', held30: 0.01 }), { cents: h.MIN_ASK, why: 'held30' });
+
+assert.strictEqual(h.fmtAgo(now - 2 * 3600000, now), 'today');
+assert.strictEqual(h.fmtAgo(now - 1.5 * h.DAY, now), 'yesterday');
+assert.strictEqual(h.fmtAgo(now - 12.2 * h.DAY, now), '12 days ago');
 
 // Nearest point by time.
 assert.strictEqual(h.nearestIndex(pts, pts[1].t), 1);

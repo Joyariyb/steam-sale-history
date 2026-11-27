@@ -4,8 +4,9 @@ A userscript for the Steam Community inventory page. It puts an item's Community
 history above the card grid, so you can price what you sell from what it has actually sold for.
 
 Steam already draws this chart, but only on each item's market page, one item at a time. This
-script fetches the same data for whichever item you click and keeps the whole pricing loop in one
-place: look at the history, pick a price, list.
+script fetches the same data for whichever item you click and prices it for you: each card opens
+at the highest price it has held in the last 30 days, so selling is two clicks. Click the card,
+click List.
 
 ## Install
 
@@ -20,20 +21,52 @@ versions on its own.
 
 ## What it shows
 
-- **A strip above the grid** on every marketable item: a 30-day sparkline, the median, the trend
-  against the 30 days before, and sales per day. Click it to expand; the choice is remembered.
+- **The ask**: the price the card opens on, with the reason beside it: how many units sold at or
+  above it, on how many days, and when last. Type over it, or change it with a chip, a bar, or
+  the chart. "reset" goes back to the default.
+- **List**: posts the listing to Steam at the ask and names what you receive after fees. Steam
+  still asks you to confirm in its mobile app. With more than one copy, **List all** lists every
+  copy on the loaded pages, one request at a time.
 - **The chart**: median sale price over time, with units sold as bars along the bottom. Ranges
-  7d, 30d, 1y and All. Hover a point for its date, price and units sold.
-- **Sales by price**: a bar per price band, bright at or above your asking price, with the share
-  of sales at or above it.
-- **Price chips**: lowest current listing, 7-day median, 30-day median, 30-day high. Clicking one
-  moves the asking price there.
-- **Asking price**: the amber line on the chart. Drag it, click a point on the chart to ask that
-  price, type into the box, or use a chip.
-- **List**: posts the listing to Steam at the asking price and names what you receive after fees.
-  Steam still asks you to confirm in its mobile app.
-- **Grid hover**: rest the mouse on a tile and a small card shows its sparkline, median, trend
-  and sales per day.
+  7d, 30d, 1y and All. Hover a point for its date, price and units sold. Outliers are hollow dots
+  and do not stretch the scale. The amber line is the ask: drag it, or click a point to ask that
+  price.
+- **Sales by price**: a bar per price band over the last 30 days. Click a bar to ask that price.
+  Bars above the held high are grey.
+- **Price chips**: cheapest listing, 30-day median, 7-day high, held high, raw high.
+- **Collapsed strip**: a sparkline, the reason for the price and its own List button, so you can
+  sell without expanding. The choice is remembered.
+- **Tiles**: a tile shows its price once its history has been fetched (clicked or hovered), and a
+  tick once listed. Rest the mouse on a tile for its sparkline, held high, median and sales per
+  day.
+- **Session tally**: how many you have listed since the page loaded and what they pay you.
+
+## How a card is priced
+
+The **held high** is the highest price that at least 5% of the last 30 days' units sold at or
+above (never fewer than three units), with real volume on two or more separate days. A single
+spike, or a surge that lasted one day, falls outside that and is set aside as an outlier.
+
+- If the cheapest current listing is above the held high, the market has moved up, and the ask
+  is one cent under that listing.
+- If nothing has held that high in the last 10 days, the panel warns you and names the 7-day
+  high. The ask stays where it is.
+- Steam's history is one median price per hour, not single sales, so "highest" means the highest
+  hourly median.
+
+**Rules**, in the panel's header, changes all of this: the price a card opens on (30-day held
+high, 7-day held high, cheapest listing), how much is set aside as outliers (top 2%, 5% or 10%),
+and switches for the two rules above, auto-advance, the keyboard, and remembering a price you set
+by hand for a card.
+
+## Keyboard
+
+- **Enter** lists the selected card at the ask.
+- **Left / Right** move to the previous or next marketable, unlisted card on the page.
+- **1 to 5** pick a price chip.
+
+After a listing, the next unlisted card is selected, so a run of cards is one click or one Enter
+each. Keys are ignored while you type in a field or a Steam dialog is open.
 
 ## How it works
 
@@ -43,7 +76,9 @@ versions on its own.
   panel, so it costs no extra request.
 - Listing posts to `/market/sellitem/` the way Steam's own sell dialog does. The price sent is
   what you receive; the buyer's price is worked out with Steam's fee rules.
-- Steam rate-limits history lookups. Clicking through cards at a normal pace is fine; after a
+- Rules and the open/closed choice are kept in the browser's local storage for steamcommunity.com.
+- Steam rate-limits history lookups, which is why tiles are only priced once you have clicked or
+  hovered them. Clicking through cards at a normal pace is fine; after a
   burst the panel says so and waits a moment.
 
 ## Development
