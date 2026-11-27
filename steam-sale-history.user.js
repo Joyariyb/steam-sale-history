@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam Inventory Sale History
 // @namespace    joey.steam-tools
-// @version      3.0.0
+// @version      3.1.0
 // @description  Sale history above the inventory grid. Each card opens priced at its 30-day held high (outliers set aside), so selling is two clicks: card, List. Chart, clickable sales-by-price bars, price chips, list-all, auto-advance, keyboard and tile price badges.
 // @author       Joey
 // @homepageURL  https://github.com/Joyariyb/steam-sale-history
@@ -253,7 +253,7 @@
   // Pricing rules, each kept in localStorage: [key, default].
   const RULES = {
     source: ['ssh.source', 'held30'], trim: ['ssh.trim', '0.05'], undercut: ['ssh.undercut', '1'],
-    stale: ['ssh.stale', '1'], advance: ['ssh.advance', '1'], keys: ['ssh.keys', '1'], remember: ['ssh.remember', '0'],
+    stale: ['ssh.stale', '1'], advance: ['ssh.advance', '1'], keys: ['ssh.keys', '1'], remember: ['ssh.remember', '0'], dock: ['ssh.dock', '1'],
   };
   const SOURCES = [['held30', 'Held high, 30 days'], ['held7', 'Held high, 7 days'], ['lowest', 'Cheapest listing']];
   const TRIMS = [['0.02', 'Loose, top 2%'], ['0.05', 'Balanced, top 5%'], ['0.1', 'Strict, top 10%']];
@@ -263,6 +263,7 @@
     ['advance', 'After listing, select the next unlisted card'],
     ['keys', 'Keyboard: Enter lists, arrow keys move between cards, 1 to 5 pick a price'],
     ['remember', 'Remember a price I set by hand for that card'],
+    ['dock', 'Sit beside the grid, in the page margin, when there is room'],
   ];
   const WHY = {
     held30: 'Held high, 30 days', held7: 'Held high, 7 days', lowest: 'Cheapest listing',
@@ -273,6 +274,7 @@
   const STYLE = `
     .ssh-box { box-sizing: border-box; width: 100%; margin: 0 0 8px; padding: 8px 10px; background: rgba(0,0,0,.3);
                border: 1px solid #2a3f5a; border-radius: 3px; font: 11px "Motiva Sans", Arial, sans-serif; color: ${GREY}; }
+    .ssh-box.dock { position: fixed; z-index: 400; margin: 0; overflow-y: auto; background: #16202d; }
     .ssh-box a { text-decoration: none; cursor: pointer; }
     .ssh-strip { display: flex; align-items: center; gap: 10px; min-height: 28px; }
     .ssh-box.open .ssh-strip { display: none; }
@@ -472,8 +474,11 @@
   }
 
   function panelLowest(panel) {
-    const el = panel && panel.querySelector('[id$="_item_market_actions"]');
-    return el ? parseStartingAt(el.innerText || el.textContent) : null;
+    if (!panel) return null;
+    const el = panel.querySelector('[id$="_item_market_actions"]');
+    const v = el ? parseStartingAt(el.innerText || el.textContent) : null;
+    // Other inventory extensions move that block; the line itself is still somewhere in the panel.
+    return v != null ? v : parseStartingAt(panel.innerText || panel.textContent);
   }
 
   // One shared panel, mounted above the grid.
@@ -553,6 +558,36 @@
     else document.body.appendChild(el);
   }
 
+  // Where the panel sits. With room in the page margin left of the grid it is
+  // pinned there, so the grid and Steam's own item panel stay where they were;
+  // otherwise it goes above the grid.
+  const DOCK_MIN = 400, DOCK_MAX = 540;
+  function placeBox() {
+    if (!box) return;
+    const col = document.querySelector('.inventory_page_left') || document.getElementById('inventories');
+    const r = col ? col.getBoundingClientRect() : null;
+    const room = r ? r.left - 24 : 0;
+    if (on('dock') && room >= DOCK_MIN) {
+      if (box.parentElement !== document.body) document.body.appendChild(box);
+      box.classList.add('dock');
+      const w = Math.min(DOCK_MAX, room), top = Math.max(8, r.top);
+      box.style.width = w + 'px';
+      box.style.left = (r.left - 12 - w) + 'px';
+      box.style.top = top + 'px';
+      box.style.maxHeight = `calc(100vh - ${top + 8}px)`;
+    } else if (box.classList.contains('dock') || !box.parentElement) {
+      box.classList.remove('dock');
+      box.style.width = box.style.left = box.style.top = box.style.maxHeight = '';
+      mountBox(box);
+    }
+  }
+
+  let placing = 0;
+  function queuePlace() {
+    if (placing) return;
+    placing = requestAnimationFrame(() => { placing = 0; placeBox(); });
+  }
+
   function ensureBox() {
     if (box) return box;
     box = document.createElement('div');
@@ -620,7 +655,9 @@
     if (typeof ResizeObserver === 'function') {
       new ResizeObserver(() => { if (canvas.clientWidth) redrawPrice(); }).observe(canvas);
     }
-    mountBox(box);
+    placeBox();
+    window.addEventListener('scroll', queuePlace, { passive: true });
+    window.addEventListener('resize', queuePlace);
     return box;
   }
 
@@ -676,6 +713,7 @@
 
   function rulesChanged() {
     syncRules();
+    placeBox();
     if (!S.data || !S.points.length) return;
     analyse();
     if (!S.manual || S.why === 'saved') applyDefault();
@@ -716,6 +754,7 @@
     }
     if (!isCurrent(item)) return;
     box.style.display = '';
+    placeBox();
     const key = item.appid + '/' + item.hash;
     if (S.key === key) {
       S.panel = panel;

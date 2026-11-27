@@ -34,6 +34,9 @@ versions on its own.
 - **Sales by price**: a bar per price band over the last 30 days. Click a bar to ask that price.
   Bars above the held high are grey.
 - **Price chips**: cheapest listing, 30-day median, 7-day high, held high, raw high.
+- **Placement**: on a wide window the panel sits in the page margin to the left of the grid and
+  stays in view as you scroll, so the cards and Steam's own item panel keep their place. With
+  less than 400px of margin it goes above the grid instead. Rules has a switch for this.
 - **Collapsed strip**: a sparkline, the reason for the price and its own List button, so you can
   sell without expanding. The choice is remembered.
 - **Tiles**: a tile shows its price once its history has been fetched (clicked or hovered), and a
