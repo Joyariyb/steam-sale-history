@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam Card Trader
 // @namespace    joey.steam-tools
-// @version      1.0.0
+// @version      1.0.1
 // @description  Buy side and sell side for trading cards. On the market: a scanner that ranks cards worth a buy order after fees, and a helper on each card's page that sets the price in Steam's buy dialog. In the inventory: Sale History's panel, with the lowest price that still profits on what you paid, and a scan that prices every card you hold.
 // @author       Joey
 // @homepageURL  https://github.com/Joyariyb/steam-sale-history
@@ -2688,7 +2688,7 @@
       body);
     document.body.appendChild(root);
     const me = helper = { hash, root, body, rec: null, plan: null, auto: /(^|[#&])sct\b/.test(location.hash), filled: '', open: false,
-                          gone: 0, syncing: false, t0: Date.now(), vpn: '', timer: 0 };
+                          gone: 0, syncing: false, autoDone: false, t0: Date.now(), vpn: '', timer: 0 };
     try {
       me.rec = await loadCard(false, hash);
       if (helper !== me) return;
@@ -2746,11 +2746,24 @@
     else if (p) {
       kids.push(el('div', { class: 'sct-acts' },
         me.open ? el('a', { class: 'sct-btn small go', text: `Put ${$(p.buy)} in the buy box`, onclick: () => fillBuyBox(true) })
-                : el('a', { class: 'sct-btn small go', href: cardUrl(me.hash) + '?buy=1#sct', text: `Open the buy box at ${$(p.buy)}` }),
+                : el('a', { class: 'sct-btn small go', text: `Open the buy box at ${$(p.buy)}`, onclick: openBuyBox }),
         el('a', { class: 'sct-btn small', text: 'Note this order', title: 'Keep the price for the inventory. Your open orders are also read from Steam.',
                   onclick: noteOrder })));
     }
     me.body.replaceChildren(...kids);
+  }
+
+  // Steam opens its buy box only when a card's page itself loads with ?buy=1, which is
+  // how the scanner's Open gets there. A link to that address from inside the page does
+  // not do it: Steam's pages handle a change of address themselves, without loading
+  // anything, and a tab already on the address does nothing at all. So put the address in
+  // place quietly and load the page afresh. Loading is all this does: it never presses
+  // anything of Steam's.
+  function openBuyBox() {
+    const me = helper;
+    if (!me) return;
+    history.replaceState(history.state, '', cardUrl(me.hash) + '?buy=1#sct');
+    location.reload();
   }
 
   // Steam's buy box, if it is open: {price, qty}. It is told apart by its shape: exactly one
@@ -2824,12 +2837,23 @@
     const open = boxes.price ? true : me.gone >= 3 ? false : me.open;
     if (open === me.open) return;
     me.open = open;
-    // Unasked, the price goes in only where the scanner's Open led: Steam's own buy box,
-    // opened with the page and still on the cheapest listing's price.
-    if (open && me.auto && !me.filled && Date.now() - me.t0 < 20000 && startsAtAsk(me, boxes.price)) fillBuyBox(false);
-    else drawHelper();
-    // The box closing may mean an order went in: read the orders again.
-    if (!open) resync(me);
+    if (!open) {
+      // What was said about the box no longer holds once it has closed. It may have
+      // closed because an order went in, so read the orders again.
+      me.filled = '';
+      drawHelper();
+      resync(me);
+      return;
+    }
+    // Unasked, the price goes in once, and only where the scanner's Open or this panel's
+    // button led: Steam's own buy box, opened with the page and still on the cheapest
+    // listing's price.
+    if (me.auto && !me.autoDone && Date.now() - me.t0 < 20000 && startsAtAsk(me, boxes.price)) {
+      me.autoDone = true;
+      fillBuyBox(false);
+    } else {
+      drawHelper();
+    }
   }
 
   // Keep the price for the inventory by hand: what is in Steam's buy box if it is open, else the plan's.
