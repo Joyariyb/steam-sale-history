@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Steam Card Trader
 // @namespace    joey.steam-tools
-// @version      1.0.0
-// @description  Buy side and sell side for trading cards. On the market: a scanner that ranks cards worth a buy order after fees, and a helper on each card's page that sets the price in Steam's buy dialog. In the inventory: Sale History's panel, with the lowest price that still profits on what you paid, and a scan that prices every card you hold.
+// @version      1.1.0
+// @description  Buy side and sell side for trading cards. On the market: a scanner that ranks cards worth a buy order after fees, and a helper on each card's page that sets the price in Steam's buy dialog. In the inventory: Sale History's panel, with the lowest price that still profits on what you paid, and a scan that prices every card you hold. On the Booster Pack Creator: which of your games makes a pack worth more than its gems.
 // @author       Joey
 // @homepageURL  https://github.com/Joyariyb/steam-sale-history
 // @supportURL   https://github.com/Joyariyb/steam-sale-history/issues
@@ -11,6 +11,7 @@
 // @match        https://steamcommunity.com/id/*/inventory*
 // @match        https://steamcommunity.com/profiles/*/inventory*
 // @match        https://steamcommunity.com/market*
+// @match        https://steamcommunity.com/tradingcards/boostercreator*
 // @run-at       document-idle
 // @noframes
 // @grant        none
@@ -474,6 +475,184 @@
     const text = (cents / 100).toFixed(2).replace('.', comma ? ',' : '.');
     return m ? old.slice(0, m.index) + text + old.slice(m.index + m[0].length) : text;
   }
+
+  // ---- booster packs ----
+  // Gems are bought and sold on the market in Sacks of Gems, 1000 gems a sack.
+  const SACK_GEMS = 1000;
+  const SACK_HASH = '753-Sack of Gems';
+
+  // Steam writes a few characters of a game's name as HTML entities: "Tom &amp; Jerry".
+  function unescapeHtml(s) {
+    const named = { amp: '&', lt: '<', gt: '>', quot: '"', apos: '\'' };
+    return String(s == null ? '' : s).replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z]+);/gi, (m, e) => {
+      if (e[0] !== '#') return named[e.toLowerCase()] || m;
+      const n = /^#x/i.test(e) ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+      return n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : m;
+    });
+  }
+
+  // The games the Booster Pack Creator offers, from its catalog, given as a list or keyed by
+  // appid. An entry is {appid, name, series, price: the pack's cost in gems, as text}, plus
+  // unavailable and available_at_time once a pack was made in the last day.
+  // -> [{appid, name, series, gems, cool, at}], one per game, in the catalog's order.
+  function creatorGames(list) {
+    const out = [], seen = new Set();
+    for (const g of Array.isArray(list) ? list : Object.values(list || {})) {
+      const appid = parseInt(g && g.appid, 10);
+      const price = String(g && g.price != null ? g.price : '').trim();
+      const gems = Math.round(parseFloat(/^\d{1,3}([,.\s]\d{3})+$/.test(price) ? price.replace(/\D/g, '') : price));
+      if (!(appid > 0) || !(gems > 0) || seen.has(appid)) continue;
+      seen.add(appid);
+      out.push({
+        appid, gems, series: parseInt(g.series, 10) || 1, name: unescapeHtml(g.name).trim() || `App ${appid}`,
+        cool: !!g.unavailable, at: g.available_at_time ? unescapeHtml(g.available_at_time).trim() : '',
+      });
+    }
+    return out;
+  }
+
+  // Where the JSON value that opens at text[i] ('[' or '{') closes, or -1. Brackets inside
+  // strings do not count.
+  function jsonEnd(text, i) {
+    let depth = 0, str = false;
+    for (; i < text.length; i++) {
+      const ch = text[i];
+      if (str) {
+        if (ch === '\\') i++;
+        else if (ch === '"') str = false;
+      } else if (ch === '"') str = true;
+      else if (ch === '[' || ch === '{') depth++;
+      else if ((ch === ']' || ch === '}') && --depth === 0) return i + 1;
+    }
+    return -1;
+  }
+
+  // The creator page's own script calls CBoosterCreatorPage.Init( catalog as JSON, gems,
+  // tradable gems, untradable gems, ... ). Read from that script's text: {games, goo:
+  // {total, tradable, untradable} or null}, or null when the call or its catalog is not there.
+  function parseCreatorInit(text) {
+    const s = String(text || ''), call = 'CBoosterCreatorPage.Init(';
+    const at = s.indexOf(call);
+    if (at < 0) return null;
+    const open = s.indexOf('[', at + call.length);
+    if (open < 0 || s.slice(at + call.length, open).trim()) return null;
+    const end = jsonEnd(s, open);
+    if (end < 0) return null;
+    let list;
+    try { list = JSON.parse(s.slice(open, end)); } catch (e) { return null; }
+    // The three gem counts follow, as plain numbers or as parseFloat( "1234" ).
+    const goo = [];
+    let rest = s.slice(end);
+    while (goo.length < 3) {
+      const m = /^\s*,\s*([^,]*)/.exec(rest);
+      const n = m && /\d+(\.\d+)?/.exec(m[1]);
+      if (!n) break;
+      goo.push(parseFloat(n[0]));
+      rest = rest.slice(m[0].length);
+    }
+    return { games: creatorGames(list), goo: goo.length === 3 ? { total: goo[0], tradable: goo[1], untradable: goo[2] } : null };
+  }
+
+  // A pack's market name. It keeps the name a game had when its cards came out, so a renamed
+  // game's pack is found by searching instead.
+  function boosterHash(appid, name) {
+    return `${appid}-${name} Booster Pack`;
+  }
+
+  // The best buy order and the cheapest listing in an order book, in cents, null where there is none.
+  function bookTops(book) {
+    const top = (amt, compact) => {
+      const n = Number(amt);
+      if (n > 0) return Math.round(n);
+      const l = bookLevels(compact, 1)[0];
+      return l ? l.c : null;
+    };
+    return {
+      bid: top(book && book.amtMaxBuyOrder, book && book.rgCompactBuyOrders),
+      ask: top(book && book.amtMinSellOrder, book && book.rgCompactSellOrders),
+    };
+  }
+
+  // What one gem is worth, in cents: a Sack of Gems sold to its best buy order, less the fees.
+  function gemCents(sackBid, w) {
+    return sackBid > 0 ? receivedForBuyerPays(sackBid, w) / SACK_GEMS : null;
+  }
+
+  // What one pack nets once its gems are counted at what they would sell for, in cents.
+  // now: sold to the best buy order. listed: listed one cent under the cheapest listing (never
+  // under the best buy order), once someone buys it. null where there is no such order or listing.
+  function packNet(gems, bid, ask, perGem, w) {
+    const cost = gems * perGem;
+    const keepNow = bid > 0 ? receivedForBuyerPays(bid, w) : null;
+    const listAt = ask > 0 ? Math.max(MIN_ASK, ask - 1, bid > 0 ? bid : 0) : null;
+    const keepListed = listAt ? receivedForBuyerPays(listAt, w) : null;
+    const net = keep => (keep == null ? null : Math.round(keep - cost) || 0);
+    return { cost, keepNow, now: net(keepNow), listAt, keepListed, listed: net(keepListed) };
+  }
+
+  // 'pays' when selling to the best buy order beats the gems, 'listed' when only a listing
+  // would, 'even' when the better of the two comes to nothing, 'loses' when both lose, else null.
+  function packVerdict(net) {
+    if (!net || (net.now == null && net.listed == null)) return null;
+    if (net.now > 0) return 'pays';
+    if (net.listed > 0) return 'listed';
+    const best = Math.max(net.now == null ? -Infinity : net.now, net.listed == null ? -Infinity : net.listed);
+    return best === 0 ? 'even' : 'loses';
+  }
+
+  // "+A$0.75", "−A$0.12", "A$0.00".
+  function signedCents(code, cents) {
+    return (cents > 0 ? '+' : cents < 0 ? '−' : '') + centsText(code, Math.abs(cents));
+  }
+
+  // Units sold over the last `days`, and the price half of them sold at or under, in cents.
+  function recentSales(points, days, now) {
+    const sold = points.filter(p => p.t >= now - days * DAY && p.v > 0).sort((a, b) => a.p - b.p);
+    let units = 0, run = 0;
+    for (const p of sold) units += p.v;
+    for (const p of sold) {
+      run += p.v;
+      if (run * 2 >= units) return { units, median: Math.round(p.p * 100) };
+    }
+    return { units: 0, median: null };
+  }
+
+  // The pack table's columns, as sort keys. A missing value sorts last whichever way a column
+  // is turned; ties go to what selling now nets, then listing, then the name.
+  const PACK_KEYS = {
+    name: x => x.g.name.toLowerCase(), gems: x => x.g.gems,
+    bid: x => (x.r && x.r.b) || null, ask: x => (x.r && x.r.a) || null,
+    now: x => (x.net ? x.net.now : null), listed: x => (x.net ? x.net.listed : null),
+    sold: x => (x.r && x.r.s7 != null ? x.r.s7 : null),
+  };
+
+  function sortPacks(rows, key, dir) {
+    const by = (f, d) => (a, b) => {
+      const x = f(a), y = f(b);
+      if (x == null || y == null) return (x == null) - (y == null);
+      return (x < y ? -1 : x > y ? 1 : 0) * d;
+    };
+    const order = [by(PACK_KEYS[key] || PACK_KEYS.now, dir), by(PACK_KEYS.now, -1), by(PACK_KEYS.listed, -1), by(PACK_KEYS.name, 1)];
+    return rows.slice().sort((a, b) => {
+      for (const f of order) {
+        const c = f(a, b);
+        if (c) return c;
+      }
+      return 0;
+    });
+  }
+
+  // Each of the creator's games with its looked-up pack and what a pack nets, best first.
+  // recs, by appid: {b: best buy order, a: cheapest listing, in cents}, or {err} or {none}
+  // when there is no order book to go on.
+  function rankPacks(games, recs, perGem, w) {
+    const rows = games.map(g => {
+      const r = (recs && recs[g.appid]) || null;
+      const net = r && !r.err && !r.none && perGem != null ? packNet(g.gems, r.b, r.a, perGem, w) : null;
+      return { g, r, net };
+    });
+    return sortPacks(rows, 'now', -1);
+  }
   // --- end helpers ---
 
   const RANGES = [['7d', 7], ['30d', 30], ['1y', 365], ['All', 0]];
@@ -623,17 +802,17 @@
     .sct-launch:hover { background: #33566f; color: #fff; }
     .sct-dash { position: fixed; inset: 0; z-index: 9000; overflow-y: auto; background: #1b2838; color: ${LIGHT};
                 font: 13px/1.4 "Motiva Sans", Arial, sans-serif; text-align: left; }
-    .sct-dash *, .sct-card * { box-sizing: border-box; }
-    .sct-dash a, .sct-card a { color: ${BLUE}; text-decoration: none; cursor: pointer; }
+    .sct-dash *, .sct-card *, .sct-packs * { box-sizing: border-box; }
+    .sct-dash a, .sct-card a, .sct-packs a { color: ${BLUE}; text-decoration: none; cursor: pointer; }
     .sct-dash-in { max-width: 1240px; margin: 0 auto; padding: 18px 20px 60px; }
     .sct-dh { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
     .sct-dh h1 { flex: 1; margin: 0; font: 22px "Motiva Sans", Arial, sans-serif; color: #fff; }
-    .sct-dash a.sct-btn, .sct-card a.sct-btn { display: inline-block; padding: 6px 14px; border: 1px solid #3d6c8d; border-radius: 3px; background: #2a475e;
-               color: ${BLUE}; font: 13px "Motiva Sans", Arial, sans-serif; white-space: nowrap; }
-    .sct-dash a.sct-btn:hover, .sct-card a.sct-btn:hover { background: #33566f; color: #fff; }
-    .sct-dash a.sct-btn.go, .sct-card a.sct-btn.go { background: #75b022; border-color: #75b022; color: #10202b; }
-    .sct-dash a.sct-btn.go:hover, .sct-card a.sct-btn.go:hover { background: #8ed13a; color: #10202b; }
-    .sct-dash a.sct-btn.small, .sct-card a.sct-btn.small { padding: 2px 9px; font-size: 12px; }
+    .sct-dash a.sct-btn, .sct-card a.sct-btn, .sct-packs a.sct-btn { display: inline-block; padding: 6px 14px; border: 1px solid #3d6c8d; border-radius: 3px;
+               background: #2a475e; color: ${BLUE}; font: 13px "Motiva Sans", Arial, sans-serif; white-space: nowrap; }
+    .sct-dash a.sct-btn:hover, .sct-card a.sct-btn:hover, .sct-packs a.sct-btn:hover { background: #33566f; color: #fff; }
+    .sct-dash a.sct-btn.go, .sct-card a.sct-btn.go, .sct-packs a.sct-btn.go { background: #75b022; border-color: #75b022; color: #10202b; }
+    .sct-dash a.sct-btn.go:hover, .sct-card a.sct-btn.go:hover, .sct-packs a.sct-btn.go:hover { background: #8ed13a; color: #10202b; }
+    .sct-dash a.sct-btn.small, .sct-card a.sct-btn.small, .sct-packs a.sct-btn.small { padding: 2px 9px; font-size: 12px; }
     .sct-status { min-height: 20px; color: ${GREY}; }
     .sct-bar { height: 4px; margin: 6px 0 10px; border-radius: 2px; background: #16202d; overflow: hidden; }
     .sct-bar i { display: block; width: 0; height: 100%; background: ${BLUE}; transition: width .3s; }
@@ -676,6 +855,21 @@
     .sct-cb p { margin: 5px 0 0; color: #a9b4bd; }
     .sct-cb p b { color: ${LIGHT}; font-weight: normal; }
     .sct-acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+    .sct-packs { margin: 18px 0; background: #16202d; border: 1px solid #2a3f5a; border-radius: 4px; color: ${LIGHT};
+                 font: 13px/1.4 "Motiva Sans", Arial, sans-serif; text-align: left; }
+    .sct-ph { display: flex; align-items: center; gap: 12px; padding: 8px 12px; border-bottom: 1px solid #2a3f5a; }
+    .sct-ph b { flex: 1; color: #fff; font-weight: normal; font-size: 15px; }
+    .sct-packs.shut .sct-pb { display: none; }
+    .sct-packs.shut .sct-ph { border-bottom: 0; }
+    .sct-pb { padding: 10px 12px 12px; }
+    .sct-psum { margin: 0 0 8px; color: #fff; }
+    .sct-psum:empty { display: none; }
+    .sct-ptable { overflow-x: auto; }
+    .sct-packs .sct-t td.name { max-width: 290px; }
+    .sct-packs .sct-t tr.cool td { opacity: .5; }
+    .sct-pfoot { margin: 10px 0 0; color: ${GREY}; font-size: 12px; }
+    .sct-bad { color: #e06b5c; }
+    .sct-tag.lose { color: #e06b5c; border-color: #6b2f28; background: rgba(224,107,92,.1); }
   `;
 
   function addStyle() {
@@ -2337,7 +2531,7 @@
     ['perMonth', 'A month', 'Profit × 30 ÷ the trip\'s days: what the money in one card earns in a month if every step goes to plan. In cents.'],
     ['', '', ''],
   ];
-  const scan = { running: false, stop: false, done: 0, total: 0, note: '', error: '' };
+  const scan = { running: false, stop: false, done: 0, total: 0, note: '', error: '', what: 'scan', draw: () => drawStatus() };
   const view = { tab: 'buy', sort: 'perMonth', dir: -1, kind: '', text: '', msg: '' };
   let scanData = null;
   let dash = null;
@@ -2361,20 +2555,23 @@
     }
   }
 
-  // Wait a second at a time, so a stop is noticed and a countdown can be shown.
-  async function hold(seconds, say) {
+  // Wait a second at a time, so a stop is noticed and a countdown can be shown. job is what
+  // is looking things up: the scan here, or the pack ranking on the Booster Pack Creator.
+  async function hold(seconds, say, job = scan) {
     const end = Date.now() + seconds * 1000;
     while (Date.now() < end) {
-      if (scan.stop) throw STOP;
-      if (say) { scan.note = say(Math.ceil((end - Date.now()) / 1000)); drawStatus(); }
+      if (job.stop) throw STOP;
+      if (say) { job.note = say(Math.ceil((end - Date.now()) / 1000)); job.draw(); }
       await sleep(Math.min(1000, Math.max(0, end - Date.now())));
     }
   }
 
   // One lookup, tried again after a long wait when Steam says it has had too many.
+  // state: {refused, job}, kept across one run's lookups.
   async function lookup(state, fn) {
+    const job = state.job || scan;
     for (;;) {
-      if (scan.stop) throw STOP;
+      if (job.stop) throw STOP;
       try {
         const v = await fn();
         state.refused = 0;
@@ -2382,11 +2579,11 @@
       } catch (e) {
         if (!e.rate) throw e;
         if (++state.refused > 3) {
-          const err = new Error('Steam kept refusing lookups, so the scan stopped. Leave it an hour before scanning again.');
+          const err = new Error(`Steam kept refusing lookups, so the ${job.what} stopped. Leave it an hour before trying again.`);
           err.fatal = true;
           throw err;
         }
-        await hold([120, 300, 900][state.refused - 1], s => `Steam is refusing lookups for now. Trying again in ${fmtSpan(s)}.`);
+        await hold([120, 300, 900][state.refused - 1], s => `Steam is refusing lookups for now. Trying again in ${fmtSpan(s)}.`, job);
       }
     }
   }
@@ -2688,7 +2885,7 @@
       body);
     document.body.appendChild(root);
     const me = helper = { hash, root, body, rec: null, plan: null, auto: /(^|[#&])sct\b/.test(location.hash), filled: '', open: false,
-                          gone: 0, syncing: false, t0: Date.now(), vpn: '', timer: 0 };
+                          gone: 0, syncing: false, autoDone: false, t0: Date.now(), vpn: '', timer: 0 };
     try {
       me.rec = await loadCard(false, hash);
       if (helper !== me) return;
@@ -2746,11 +2943,24 @@
     else if (p) {
       kids.push(el('div', { class: 'sct-acts' },
         me.open ? el('a', { class: 'sct-btn small go', text: `Put ${$(p.buy)} in the buy box`, onclick: () => fillBuyBox(true) })
-                : el('a', { class: 'sct-btn small go', href: cardUrl(me.hash) + '?buy=1#sct', text: `Open the buy box at ${$(p.buy)}` }),
+                : el('a', { class: 'sct-btn small go', text: `Open the buy box at ${$(p.buy)}`, onclick: openBuyBox }),
         el('a', { class: 'sct-btn small', text: 'Note this order', title: 'Keep the price for the inventory. Your open orders are also read from Steam.',
                   onclick: noteOrder })));
     }
     me.body.replaceChildren(...kids);
+  }
+
+  // Steam opens its buy box only when a card's page itself loads with ?buy=1, which is
+  // how the scanner's Open gets there. A link to that address from inside the page does
+  // not do it: Steam's pages handle a change of address themselves, without loading
+  // anything, and a tab already on the address does nothing at all. So put the address in
+  // place quietly and load the page afresh. Loading is all this does: it never presses
+  // anything of Steam's.
+  function openBuyBox() {
+    const me = helper;
+    if (!me) return;
+    history.replaceState(history.state, '', cardUrl(me.hash) + '?buy=1#sct');
+    location.reload();
   }
 
   // Steam's buy box, if it is open: {price, qty}. It is told apart by its shape: exactly one
@@ -2824,12 +3034,23 @@
     const open = boxes.price ? true : me.gone >= 3 ? false : me.open;
     if (open === me.open) return;
     me.open = open;
-    // Unasked, the price goes in only where the scanner's Open led: Steam's own buy box,
-    // opened with the page and still on the cheapest listing's price.
-    if (open && me.auto && !me.filled && Date.now() - me.t0 < 20000 && startsAtAsk(me, boxes.price)) fillBuyBox(false);
-    else drawHelper();
-    // The box closing may mean an order went in: read the orders again.
-    if (!open) resync(me);
+    if (!open) {
+      // What was said about the box no longer holds once it has closed. It may have
+      // closed because an order went in, so read the orders again.
+      me.filled = '';
+      drawHelper();
+      resync(me);
+      return;
+    }
+    // Unasked, the price goes in once, and only where the scanner's Open or this panel's
+    // button led: Steam's own buy box, opened with the page and still on the cheapest
+    // listing's price.
+    if (me.auto && !me.autoDone && Date.now() - me.t0 < 20000 && startsAtAsk(me, boxes.price)) {
+      me.autoDone = true;
+      fillBuyBox(false);
+    } else {
+      drawHelper();
+    }
   }
 
   // Keep the price for the inventory by hand: what is in Steam's buy box if it is open, else the plan's.
@@ -2878,6 +3099,356 @@
   }
   // --- end market ---
 
+  // --- booster creator ---
+  // On Steam's Booster Pack Creator: which of the account's games makes a pack worth more than
+  // the gems it costs. The games come from Steam's own page. Each pack is looked up without the
+  // Steam sign-in, a few seconds apart. Nothing here makes, lists or buys a pack: a pack is made
+  // with Steam's own button, by the person.
+  const PACK_FRESH = 3600000;
+  const PACK_TOP = 10;
+  const PACK_COLS = [
+    ['name', 'Game', ''],
+    ['gems', 'Gems', 'What Steam charges in gems for one pack, and what those gems would fetch sold as Sacks of Gems.'],
+    ['bid', 'Buy order', 'The best buy order for the pack, and how many packs the buy orders want in all.'],
+    ['now', 'Sell now', 'Sold to that buy order: what you keep after Steam\'s fees, less what the gems are worth.'],
+    ['ask', 'Listing', 'The cheapest pack for sale, and how many are listed.'],
+    ['listed', 'List it', 'Listed one cent under the cheapest listing: what you keep after fees, less the gems, once it sells.'],
+    ['sold', 'Sold, 7 days', `Packs sold in the last 7 days, and the price half of them went at or under. Looked up for the top ${PACK_TOP} rows.`],
+    ['', '', ''],
+  ];
+  const VERDICTS = {
+    pays: ['now', 'Pays', 'A pack sold to the best buy order is worth more than its gems.'],
+    listed: ['top', 'Only listed', 'No buy order pays enough to cover the gems. Listed, it pays, but only once someone buys it.'],
+    even: ['wait', 'Breaks even', 'A pack fetches about what its gems would.'],
+    loses: ['lose', 'Loses money', 'The gems are worth more sold as gems than made into this pack.'],
+  };
+  const packJob = { running: false, stop: false, done: 0, total: 0, note: '', error: '', what: 'ranking', draw: () => drawPackStatus() };
+  const packView = { sort: 'now', dir: -1 };
+  let packBox = null, packData = null, creatorText = null, creatorSig = '';
+
+  // What was looked up, kept in local storage: {gem: {t, bid, ask, cur}, games: {appid: {t,
+  // h (the pack's market name), b and a (best buy order, cheapest listing), cb and cs (how many
+  // of each), cur, then for the top rows s7, m7, hc, ht (last week's sales, their median, its
+  // currency, when)}}}. A game with no pack on the market is {t, none}, a failed lookup {t, err}.
+  function loadPacks() {
+    if (!packData) packData = readJson('sct.packs', null) || { gem: null, games: {} };
+    return packData;
+  }
+
+  function savePacks() {
+    const d = loadPacks(), cut = Date.now() - 3 * DAY;
+    for (const id of Object.keys(d.games)) if (!(d.games[id].t >= cut)) delete d.games[id];
+    writeJson('sct.packs', d);
+  }
+
+  // Looked up within the hour, in the currency gems were last priced in.
+  function freshPack(rec, d) {
+    return !!rec && !rec.err && (!!rec.none || (!!d.gem && rec.cur === d.gem.cur)) && Date.now() - rec.t < PACK_FRESH;
+  }
+
+  // The looked-up packs that can be set against the gems: those priced in the gems' currency.
+  function packRecs(info, d) {
+    const recs = {};
+    for (const g of info.games) {
+      const r = d.games[g.appid];
+      if (r && (r.err || r.none || (d.gem && r.cur === d.gem.cur))) recs[g.appid] = r;
+    }
+    return recs;
+  }
+
+  // The account's games: from Steam's own script when this one can see it, since that keeps up
+  // as packs are made, else from the page's text. {games, goo, live}, or null.
+  function readCreator() {
+    const page = window.CBoosterCreatorPage;
+    const games = page && page.sm_rgBoosterData ? creatorGames(page.sm_rgBoosterData) : [];
+    if (games.length) {
+      const num = k => (isFinite(parseFloat(page[k])) ? parseFloat(page[k]) : null);
+      const goo = num('sm_flUserGooAmount') == null ? null : {
+        total: num('sm_flUserGooAmount'), tradable: num('sm_flUserTradableGooAmount'), untradable: num('sm_flUserUntradableGooAmount'),
+      };
+      return { games, goo, live: true };
+    }
+    if (!creatorText) {
+      for (const s of document.querySelectorAll('script:not([src])')) {
+        const r = parseCreatorInit(s.textContent);
+        if (r) { creatorText = r; break; }
+      }
+    }
+    return creatorText ? Object.assign({ live: false }, creatorText) : null;
+  }
+
+  // Why nothing can be ranked, or '' when something can.
+  function creatorProblem(info) {
+    if (!info) return 'Could not read your games from this page. Steam may have changed it, so nothing can be ranked.';
+    return info.games.length ? '' : 'Steam lists no games on this page that you can make packs of.';
+  }
+
+  function creatorSignature(info) {
+    return info ? info.games.filter(g => g.cool).map(g => g.appid).join() + '|' + (info.goo ? `${info.goo.total}/${info.goo.tradable}` : '') : '';
+  }
+
+  // Steam marks a game unavailable as soon as a pack of it is made, and changes the gem count.
+  function watchCreator() {
+    const sig = creatorSignature(readCreator());
+    if (sig === creatorSig) return;
+    creatorSig = sig;
+    drawPacks();
+  }
+
+  // One game's pack: its order book, under its usual market name or else the one a search finds.
+  // call is a lookup that keeps the gap between requests.
+  async function loadPack(g, old, call) {
+    let hash = (old && old.h) || boosterHash(g.appid, g.name);
+    let ob = await call('/market/orderbook', 'Load', 753, hash);
+    if (!(ob && ob.success && ob.data)) {
+      const page = await call('/market/actions', 'Search', {
+        appid: 753, filters: { item_class: ['item_class_5'], Game: [`app_${g.appid}`] }, accessoryFilters: {}, sort: 4, direction: 2, count: 10, start: 0,
+      });
+      const found = ((page && page.results) || []).map(r => r && r.strHash).filter(Boolean);
+      const pick = found.find(h => h.startsWith(`${g.appid}-`)) || (found.length === 1 ? found[0] : null);
+      if (!pick) return { t: Date.now(), none: true };
+      if (pick !== hash) {
+        hash = pick;
+        ob = await call('/market/orderbook', 'Load', 753, hash);
+      }
+      if (!(ob && ob.success && ob.data)) throw new Error('Steam sent no order book for this pack.');
+    }
+    const book = ob.data, tops = bookTops(book);
+    return { t: Date.now(), h: hash, b: tops.bid || 0, a: tops.ask || 0, cb: book.cBuyOrders || 0, cs: book.cSellOrders || 0, cur: book.eCurrency };
+  }
+
+  async function runPacks() {
+    if (packJob.running) return;
+    const info = readCreator();
+    if (creatorProblem(info)) {
+      packJob.error = creatorProblem(info);
+      drawPackStatus();
+      return;
+    }
+    const o = opts(), d = loadPacks(), state = { refused: 0, job: packJob };
+    // Each request waits until the gap since the last one has passed.
+    let last = 0;
+    const call = async (path, method, ...args) => {
+      const wait = last + o.gap * 1000 - Date.now();
+      if (wait > 0) await hold(wait / 1000, null, packJob);
+      try { return await marketCall(true, path, method, ...args); } finally { last = Date.now(); }
+    };
+    // Games a pack can be made of today go first, so the rows that matter fill in first.
+    const games = info.games.slice().sort((a, b) => a.cool - b.cool);
+    Object.assign(packJob, { running: true, stop: false, done: 0, total: games.length + 1, note: 'What gems sell for', error: '' });
+    drawPackStatus();
+    let failed = 0;
+    try {
+      const ob = await lookup(state, () => call('/market/orderbook', 'Load', 753, SACK_HASH));
+      const book = ob && ob.success && ob.data, tops = bookTops(book);
+      if (!tops.bid) throw new Error('Steam sent no buy orders for Sacks of Gems, so gems cannot be priced. Try again later.');
+      d.gem = { t: Date.now(), bid: tops.bid, ask: tops.ask, cur: book.eCurrency };
+      packJob.done++;
+      drawPacks();
+      for (const g of games) {
+        const old = d.games[g.appid];
+        if (!freshPack(old, d)) {
+          packJob.note = g.name;
+          drawPackStatus();
+          try {
+            d.games[g.appid] = await lookup(state, () => loadPack(g, old, call));
+            failed = 0;
+          } catch (e) {
+            if (e === STOP || e.fatal) throw e;
+            d.games[g.appid] = { t: Date.now(), err: e.message, h: old && old.h };
+            if (++failed >= 5) throw new Error(`Five lookups failed in a row (${e.message}). Check the connection, then rank again.`);
+          }
+        }
+        packJob.done++;
+        if (packJob.done % 10 === 0) savePacks();
+        if (packJob.done % 5 === 0) drawPackTable();
+        drawPackStatus();
+      }
+      // Last week's sales, for the rows at the top only: each is a much larger lookup.
+      const fees = scanFees(d.gem.cur);
+      const top = rankPacks(games, packRecs(info, d), gemCents(d.gem.bid, fees), fees).filter(x => x.net).slice(0, PACK_TOP)
+        .filter(x => !(x.r.ht && Date.now() - x.r.ht < PACK_FRESH && x.r.hc === d.gem.cur));
+      packJob.total += top.length;
+      for (const x of top) {
+        packJob.note = `Last week's sales · ${x.g.name}`;
+        drawPackStatus();
+        try {
+          const ph = await lookup(state, () => call('/market/actions', 'QueryPriceHistory', 753, x.r.h));
+          const s = recentSales(apiPoints(ph && ph.prices), 7, Date.now());
+          Object.assign(x.r, { s7: s.units, m7: s.median, hc: ph && ph.ecurrency, ht: Date.now() });
+        } catch (e) {
+          if (e === STOP || e.fatal) throw e;
+        }
+        packJob.done++;
+        drawPacks();
+      }
+    } catch (e) {
+      if (e !== STOP) packJob.error = e.message;
+    }
+    savePacks();
+    Object.assign(packJob, { running: false, stop: false, note: '' });
+    drawPacks();
+  }
+
+  function drawPacks() {
+    drawPackStatus();
+    drawPackTable();
+  }
+
+  function drawPackStatus() {
+    if (!packBox) return;
+    const d = loadPacks(), o = opts(), w = wallet(), info = readCreator(), n = info ? info.games.length : 0;
+    const go = packBox.querySelector('.sct-pgo');
+    go.textContent = packJob.running ? (packJob.stop ? 'Stopping…' : 'Stop') : d.gem ? 'Rank again' : 'Rank my packs';
+    go.classList.toggle('go', !packJob.running);
+    let text;
+    if (packJob.running) {
+      const left = (packJob.total - packJob.done) * o.gap;
+      text = `Looking up ${packJob.done} of ${packJob.total}` + (left > 0 ? ` · about ${fmtSpan(left)} left` : '');
+      if (packJob.note) text += ` · ${packJob.note}`;
+    } else if (packJob.error) {
+      text = packJob.error;
+    } else if (creatorProblem(info)) {
+      text = creatorProblem(info);
+    } else if (d.gem) {
+      const when = new Date(d.gem.t).toLocaleString([], { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+      const old = info.games.filter(g => !freshPack(d.games[g.appid], d)).length;
+      text = `Prices from ${when}, in ${currencyOf(d.gem.cur)[2]}, for ${n} ${n === 1 ? 'game' : 'games'}` +
+        (old ? ` · ${old} not looked up in the last hour: Rank again to refresh ${old === 1 ? 'it' : 'them'}` : '');
+    } else {
+      text = `Not ranked yet. Ranking looks up what gems sell for, then the order book of each of your ${n} games' packs, ` +
+        `${o.gap} s apart and without your Steam sign-in: about ${fmtSpan((n + 1 + Math.min(n, PACK_TOP)) * o.gap)}.`;
+    }
+    packBox.querySelector('.sct-status').textContent = text;
+    packBox.querySelector('.sct-bar i').style.width = packJob.running && packJob.total ? `${packJob.done / packJob.total * 100}%` : '0';
+    const notes = [];
+    if (d.gem && w.cur && d.gem.cur !== w.cur) {
+      notes.push(`These prices are in ${currencyOf(d.gem.cur)[2]}, not your wallet's ${currencyOf(w.cur)[2]}: Steam saw the lookups come from ` +
+        'another country, which is what a VPN does. The ranking still holds, since gems and packs were priced in the same currency.');
+    }
+    if (packJob.running) notes.push('Keep this tab in view while it looks up. Browsers slow a hidden tab to about one lookup a minute.');
+    const goo = info && info.goo;
+    if (goo && goo.untradable >= 1) {
+      notes.push(`${Math.floor(goo.untradable).toLocaleString()} of your ${Math.floor(goo.total).toLocaleString()} gems are untradable. ` +
+        'A pack made from them cannot be sold, so choose tradable gems when you make one.');
+    }
+    packBox.querySelector('.sct-notes').replaceChildren(...notes.map(t => el('div', { class: 'sct-note', text: t })));
+  }
+
+  // One plain paragraph on what the table says.
+  function packSummary(info, ranked, cur, priced) {
+    const n = info.games.length;
+    if (!priced) return `${n} of your games can be made into booster packs. Rank them to see which packs are worth more than their gems.`;
+    const known = ranked.filter(x => packVerdict(x.net));
+    const of = v => known.filter(x => packVerdict(x.net) === v);
+    const pays = of('pays'), listed = of('listed'), loses = of('loses');
+    // Why a pack cannot be made right now: one a game a day, and only tradable gems make a pack that sells.
+    const goo = info.goo;
+    const blocked = x => (x.g.cool ? `made today${x.g.at ? `, next from ${x.g.at}` : ''}`
+      : goo && goo.tradable != null && goo.tradable < x.g.gems ? `needs ${x.g.gems.toLocaleString()} tradable gems` : '');
+    const parts = [];
+    if (pays.length) {
+      parts.push(`${pays.length} of your ${n} games ${pays.length === 1 ? 'makes a pack' : 'make packs'} worth more than the gems, sold straight to a buy order.`);
+      const why = blocked(pays[0]);
+      parts.push(`Best: ${pays[0].g.name}, ${signedCents(cur, pays[0].net.now)} a pack${why ? ` (${why})` : ''}.`);
+      if (why) {
+        const today = pays.find(x => !blocked(x));
+        parts.push(today ? `Best you can make today: ${today.g.name}, ${signedCents(cur, today.net.now)}.`
+          : pays.length === 1 ? 'It cannot be made today.' : 'None of them can be made today.');
+      }
+    } else if (known.length) {
+      parts.push(`None of the ${known.length} packs looked up is worth more than its gems sold to a buy order: selling the gems as Sacks of Gems pays more.`);
+    }
+    if (listed.length) parts.push(`${listed.length} only ${listed.length === 1 ? 'pays' : 'pay'} if listed and bought.`);
+    if (loses.length) parts.push(`${loses.length} ${loses.length === 1 ? 'loses' : 'lose'} money either way.`);
+    const none = ranked.filter(x => x.r && x.r.none).length, todo = ranked.filter(x => !x.r).length;
+    if (none) parts.push(`${none} ${none === 1 ? 'has' : 'have'} no packs on the market.`);
+    if (todo) parts.push(`${todo} not looked up yet.`);
+    return parts.join(' ');
+  }
+
+  function drawPackTable() {
+    if (!packBox) return;
+    const wrap = packBox.querySelector('.sct-ptable'), sum = packBox.querySelector('.sct-psum'), foot = packBox.querySelector('.sct-pfoot');
+    const d = loadPacks(), info = readCreator();
+    if (creatorProblem(info)) {
+      wrap.replaceChildren();
+      sum.textContent = foot.textContent = '';
+      return;
+    }
+    const cur = d.gem ? d.gem.cur : wallet().cur || 1, fees = scanFees(cur);
+    const $ = c => centsText(cur, c);
+    const perGem = d.gem ? gemCents(d.gem.bid, fees) : null;
+    const ranked = rankPacks(info.games, packRecs(info, d), perGem, fees);
+    const rows = packView.sort === 'now' && packView.dir < 0 ? ranked : sortPacks(ranked, packView.sort, packView.dir);
+    sum.textContent = packSummary(info, ranked, cur, !!d.gem);
+    const sortBy = key => {
+      if (packView.sort === key) packView.dir = -packView.dir;
+      else { packView.sort = key; packView.dir = key === 'name' ? 1 : -1; }
+      drawPackTable();
+    };
+    const head = el('tr', {}, PACK_COLS.map(([key, label, tip]) => el('th', {
+      class: packView.sort === key && key ? 'sorted' : '', title: tip, onclick: key ? () => sortBy(key) : null,
+      text: label + (packView.sort === key && key ? (packView.dir < 0 ? ' ▾' : ' ▴') : ''),
+    })));
+    const blank = text => el('span', { class: 'sct-dim', text: text || '—' });
+    const signed = (c, tip) => (c == null ? blank()
+      : el('span', { class: c > 0 ? 'sct-ok' : c < 0 ? 'sct-bad' : 'sct-dim', title: tip, text: signedCents(cur, c) }));
+    const goo = info.goo;
+    const body = rows.map(({ g, r, net }) => {
+      const v = packVerdict(net), tag = v && VERDICTS[v], book = !!r && !r.err && !r.none;
+      const notes = [];
+      if (g.cool) notes.push(g.at ? `Made today, next from ${g.at}` : 'Made today: one pack a game a day');
+      if (goo && goo.tradable != null && g.gems > goo.tradable) {
+        notes.push(goo.total >= g.gems ? `Needs ${g.gems.toLocaleString()} tradable gems, you have ${Math.floor(goo.tradable).toLocaleString()}`
+          : `Needs ${g.gems.toLocaleString()} gems, you have ${Math.floor(goo.total).toLocaleString()}`);
+      }
+      if (r && r.none) notes.push('No packs on the market');
+      else if (r && r.err) notes.push(r.err);
+      else if (!r) notes.push('Not looked up yet');
+      const cost = net ? ` less ${$(Math.round(net.cost))} of gems` : '';
+      return el('tr', { class: g.cool ? 'cool' : '' },
+        el('td', { class: 'name', title: g.name },
+          el('a', { href: cardUrl((r && r.h) || boosterHash(g.appid, g.name)), target: '_blank', rel: 'noopener', text: g.name }),
+          notes.length ? el('i', { text: notes.join(' · ') }) : null),
+        el('td', {}, el('b', { text: g.gems.toLocaleString() }), perGem != null ? blank(` ${$(Math.round(g.gems * perGem))}`) : null),
+        el('td', {}, book && r.b ? [el('b', { text: $(r.b) }), blank(` ×${r.cb.toLocaleString()}`)] : blank(book ? 'none' : '')),
+        el('td', {}, signed(net && net.now, net && net.keepNow != null ? `Keep ${$(net.keepNow)} after fees,${cost}` : '')),
+        el('td', {}, book && r.a ? [el('b', { text: $(r.a) }), blank(` ×${r.cs.toLocaleString()}`)] : blank(book ? 'none' : '')),
+        el('td', {}, signed(net && net.listed, net && net.listAt ? `List at ${$(net.listAt)}: keep ${$(net.keepListed)} after fees,${cost}` : '')),
+        el('td', { title: r && r.s7 != null ? `${r.s7} sold in the last 7 days` + (r.m7 && r.hc === cur ? `, half at or under ${$(r.m7)}` : '') : '' },
+          r && r.s7 != null ? [el('b', { class: r.s7 ? '' : 'sct-warn', text: r.s7.toLocaleString() }),
+            r.m7 && r.hc === cur ? blank(` · ${$(r.m7)}`) : null] : blank()),
+        el('td', {}, tag ? el('span', { class: 'sct-tag ' + tag[0], title: tag[2], text: tag[1] }) : null));
+    });
+    wrap.replaceChildren(el('table', { class: 'sct-t' }, el('thead', {}, head), el('tbody', {}, body)));
+    foot.textContent = 'Research only: this never makes, lists or buys a pack. Make one with Steam\'s own button above, then sell it from ' +
+      'your inventory. ' + (d.gem ? `Gems count at what a Sack of Gems (${SACK_GEMS.toLocaleString()} gems) fetches sold to its best buy order ` +
+      `of ${$(d.gem.bid)}, after fees: ${$(Math.round(perGem * SACK_GEMS))} a sack.` + (d.gem.ask ? ` Buying a sack costs ${$(d.gem.ask)}.` : '') + ' ' : '') +
+      'Prices are looked up without your Steam sign-in and kept for an hour.';
+  }
+
+  function initCreator() {
+    addStyle();
+    packBox = el('div', { class: 'sct-packs' + (pref('sct.packsShut', '0') === '1' ? ' shut' : '') },
+      el('div', { class: 'sct-ph' },
+        el('b', { text: 'Card Trader: which pack is worth making' }),
+        el('a', { class: 'sct-btn small go sct-pgo', onclick: () => { if (packJob.running) packJob.stop = true; else runPacks(); drawPackStatus(); } }),
+        el('a', { href: traderUrl(), target: '_blank', rel: 'noopener', text: 'Scanner ↗' }),
+        el('a', { title: 'Fold or unfold', text: '▾', onclick: () => setPref('sct.packsShut', packBox.classList.toggle('shut') ? '1' : '0') })),
+      el('div', { class: 'sct-pb' },
+        el('div', { class: 'sct-status' }), el('div', { class: 'sct-bar' }, el('i')), el('div', { class: 'sct-notes' }),
+        el('p', { class: 'sct-psum' }), el('div', { class: 'sct-ptable' }), el('p', { class: 'sct-pfoot' })));
+    const area = document.querySelector('.booster_creator_area');
+    if (area) area.after(packBox);
+    else (document.querySelector('.pagecontent') || document.body).append(packBox);
+    creatorSig = creatorSignature(readCreator());
+    drawPacks();
+    setInterval(watchCreator, 3000);
+  }
+  // --- end booster creator ---
+
   if (/\/inventory/.test(location.pathname)) initInventory();
   else if (/^\/market(\/|$)/.test(location.pathname)) initMarket();
+  else if (/^\/tradingcards\/boostercreator/.test(location.pathname)) initCreator();
 })();
