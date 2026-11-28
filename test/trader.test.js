@@ -10,7 +10,8 @@ const names = ['DAY', 'MIN_ASK', 'RECENT_DAYS', 'HOLD_DAYS', 'CARD_FEES', 'amoun
   'centsText', 'apiPoints', 'popcount', 'priceLevels', 'packLevels', 'unpackLevels', 'unitsOf', 'flow', 'heldPrice',
   'medianLevel', 'bookLevels', 'askToClear', 'planFlip', 'fmtDays', 'daysText', 'fmtSpan', 'moneyLike', 'parseMoney',
   'SACK_GEMS', 'SACK_HASH', 'unescapeHtml', 'creatorGames', 'jsonEnd', 'parseCreatorInit', 'boosterHash', 'bookTops', 'gemCents',
-  'packNet', 'packVerdict', 'signedCents', 'recentSales', 'sortPacks', 'rankPacks'];
+  'packNet', 'packVerdict', 'signedCents', 'recentSales', 'sortPacks', 'rankPacks',
+  'GOO_TYPES', 'FOIL_TIMES', 'gooClasses', 'perThousand', 'foilCouldPay', 'underSack', 'rankGems'];
 const h = new Function(src.slice(start, end) + '\nreturn { ' + names.join(', ') + ' };')();
 const w = h.CARD_FEES;
 
@@ -323,5 +324,65 @@ assert.deepStrictEqual(order(h.sortPacks(ranked, 'sold', -1)), order(ranked));
 assert.deepStrictEqual(order(h.sortPacks(ranked, 'gems', -1)), ['Penny', 'Gone', 'Bracket', 'Lantern', 'Filler', 'Broken', 'Unseen', 'Digimon', 'Quiet']);
 // Without a price for gems nothing nets, so the games come by name.
 assert.deepStrictEqual(order(h.rankPacks(games, recs, null, w)), order(h.sortPacks(ranked, 'name', 1)));
+
+// ---- cheap gems ----
+// Gem values Steam gave on 2026-11-28, item type -> value: a game's cards share the smaller value,
+// its backgrounds and emoticons the larger, in no fixed order, with some types worth nothing.
+const digimon = { 2: 13, 9: 13, 14: 13, 3: 13, 6: 13, 19: 100 };          // 15 cards, then the rest
+const payday = { 2: 20, 9: 20, 14: 4 };                                    // backgrounds first
+const meatBoy = { 2: 0, 9: 40, 14: 16 };                                   // types 2 to 6 empty
+assert.deepStrictEqual(h.gooClasses(Object.values(digimon)), { card: 13, bg: 100 });
+assert.deepStrictEqual(h.gooClasses(Object.values(payday)), { card: 4, bg: 20 });
+assert.deepStrictEqual(h.gooClasses(Object.values(meatBoy)), { card: 16, bg: 40 });
+assert.strictEqual(h.gooClasses([13, 13, 13]), null);                     // only cards so far
+assert.strictEqual(h.gooClasses([0, 0]), null);
+assert.strictEqual(h.gooClasses([60, 80]), null);                         // too close to be a card and a background
+// Each of those tables is what trying GOO_TYPES in order meets before both values show.
+for (const p of [digimon, payday, meatBoy]) {
+  const tried = h.GOO_TYPES.slice(0, Object.keys(p).length);
+  assert.deepStrictEqual(tried.slice().sort((a, b) => a - b), Object.keys(p).map(Number).sort((a, b) => a - b));
+}
+
+assert.strictEqual(h.perThousand(98, 1000), 98);
+assert.strictEqual(h.perThousand(11, 100), 110);                          // a 100-gem background at A$0.11
+assert.strictEqual(h.perThousand(0, 100), Infinity);
+assert.strictEqual(h.perThousand(5, 0), Infinity);
+
+// One answer bounds a game's foils: ten times it at most. A foil at 3¢ in a game whose first
+// answer was 4 can make 40 gems at best, 75¢ per 1000: no use against a Sack at 63¢.
+assert.strictEqual(h.foilCouldPay(3, 4, 63), false);
+assert.strictEqual(h.foilCouldPay(3, 8, 63), true);                       // 80 gems: 37.5¢ per 1000
+assert.strictEqual(h.foilCouldPay(25, 40, 63), true);                     // 400 gems: 62.5¢ per 1000
+assert.strictEqual(h.foilCouldPay(26, 40, 63), false);
+
+// Listings cheaper per gem than a Sack at 98: an 80-gem foil pays up to 7 (87.5 per 1000), not 8 (100).
+assert.deepStrictEqual(h.underSack([6, 2, 7, 3, 8, 10, 9, 4], 80, 98), { units: 5, cost: 33, gems: 400 });
+assert.deepStrictEqual(h.underSack([8, 10], 80, 98), { units: 0, cost: 0, gems: 0 });
+assert.deepStrictEqual(h.underSack(null, 80, 98), { units: 0, cost: 0, gems: 0 });
+
+// Ranking: an order book in the Sack's currency wins over Search's US price; foils of a game
+// with no card value yet are left out; a confirmed foil value beats ten times the card.
+const items = {
+  '10-A (Foil)': { a: 10, u: 3, l: 40, n: 'A', g: 'Ten', b: { a: 6, q: [6, 2, 7, 3, 9, 50], cur: 21 } },
+  '10-B (Foil)': { a: 10, u: 5, l: 9, n: 'B', g: 'Ten' },
+  '20-C (Foil)': { a: 20, u: 4, l: 12, n: 'C', g: 'Twenty', b: { a: 5, q: [5, 1], cur: 9 } },
+  '30-D (Foil)': { a: 30, u: 3, l: 70, n: 'D', g: 'Thirty' },
+  '40-E (Foil)': { a: 40, u: 12, l: 3, n: 'E', g: 'Forty' },
+};
+const apps = { 10: { card: 8 }, 20: { card: 4, foil: 45 }, 40: { card: 16 } };
+const sack = { ask: 98, usd: 63, cur: 21 };
+const gemRows = h.rankGems(items, apps, sack);
+assert.deepStrictEqual(gemRows.map(r => [r.h, r.gems, r.ask, r.booked, Math.round(r.vs * 1000)]), [
+  ['10-A (Foil)', 80, 6, true, 765],     // A$0.75 per 1000 against A$0.98
+  ['10-B (Foil)', 80, 5, false, 992],    // 62.5¢ per 1000 against 63¢, from Search
+  ['40-E (Foil)', 160, 12, false, 1190], // 75¢ against 63¢
+  ['20-C (Foil)', 45, 4, false, 1411],   // its book is in another currency, so Search's price; 45 gems as Steam confirmed
+]);
+assert.deepStrictEqual(gemRows[0].under, { units: 5, cost: 33, gems: 400 });
+assert.strictEqual(gemRows[1].under, null);
+// With only a US price for the Sack, as while the scan is still choosing order books, every row uses Search's price.
+assert.deepStrictEqual(h.rankGems(items, apps, { usd: 63 }).map(r => [r.h, r.booked]),
+  [['10-A (Foil)', false], ['10-B (Foil)', false], ['40-E (Foil)', false], ['20-C (Foil)', false]]);
+assert.deepStrictEqual(h.rankGems(items, apps, null), []);
 
 console.log('trader helpers: all passed');

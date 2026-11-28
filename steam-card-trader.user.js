@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Steam Card Trader
 // @namespace    joey.steam-tools
-// @version      1.1.0
-// @description  Buy side and sell side for trading cards. On the market: a scanner that ranks cards worth a buy order after fees, and a helper on each card's page that sets the price in Steam's buy dialog. In the inventory: Sale History's panel, with the lowest price that still profits on what you paid, and a scan that prices every card you hold. On the Booster Pack Creator: which of your games makes a pack worth more than its gems.
+// @version      1.2.0
+// @description  Buy side and sell side for trading cards. On the market: a scanner that ranks cards worth a buy order after fees, a scan for foils whose gems cost less than a Sack of Gems, and a helper on each card's page that sets the price in Steam's buy dialog. In the inventory: Sale History's panel, with the lowest price that still profits on what you paid, and a scan that prices every card you hold. On the Booster Pack Creator: which of your games makes a pack worth more than its gems.
 // @author       Joey
 // @homepageURL  https://github.com/Joyariyb/steam-sale-history
 // @supportURL   https://github.com/Joyariyb/steam-sale-history/issues
@@ -653,6 +653,69 @@
     });
     return sortPacks(rows, 'now', -1);
   }
+
+  // ---- cheap gems ----
+  // What an item turns into. Steam answers /auction/ajaxgetgoovalueforitemtype/ without a sign-in,
+  // for a game, an item type and a border. In every game checked (20, on 2026-11-28) all the
+  // cards share one value, all the backgrounds and emoticons share a larger one, and a foil
+  // (border 1) is worth ten times a card: Counter-Strike 2 has cards at 40, backgrounds and
+  // emoticons at 100, foils at 400. A card works out at floor(2 × background ÷ cards in the set).
+  // A game's item types start at 2, its cards and the rest in no fixed order, so a few are tried.
+  const GOO_TYPES = [2, 9, 14, 3, 6, 19, 24, 5, 11, 4];
+  const FOIL_TIMES = 10;
+
+  // A game's card and background values from the item types tried so far: {card, bg}, or null
+  // until both have shown. Sets have 5 to 15 cards, so a card is at most 2/5 of a background.
+  function gooClasses(values) {
+    const v = [...new Set(values.filter(x => x > 0))].sort((a, b) => a - b);
+    if (v.length < 2) return null;
+    const card = v[0], bg = v[v.length - 1];
+    return card * 5 <= bg * 2 ? { card, bg } : null;
+  }
+
+  // Cents per 1000 gems at a price in cents.
+  function perThousand(cents, gems) {
+    return cents > 0 && gems > 0 ? cents * 1000 / gems : Infinity;
+  }
+
+  // Whether a foil at `cents` could still beat a Sack of Gems at `sack` (both in cents, the
+  // same currency) once the first item type tried has come back worth `first` gems. A card is
+  // worth at most that (or less, when the type was a background), so a foil at most ten times it.
+  function foilCouldPay(cents, first, sack) {
+    return perThousand(cents, first * FOIL_TIMES) < sack;
+  }
+
+  // The listings in an order book's asks ([cents, quantity, ...], cheapest first) that cost less
+  // per gem than a Sack of Gems at `sack`: {units, cost in cents, gems}.
+  function underSack(compactAsks, gems, sack) {
+    let units = 0, cost = 0;
+    for (const l of bookLevels(compactAsks)) {
+      if (!(perThousand(l.c, gems) < sack)) break;
+      units += l.q;
+      cost += l.c * l.q;
+    }
+    return { units, cost, gems: units * gems };
+  }
+
+  // The gem scan's foils as table rows, cheapest gems first. items, by hash: {a: appid, u: US cents
+  // from Search, l: listings, b: order book {a: ask, q: compact asks, cur} once looked up}.
+  // apps, by appid: {card, foil} once known. sack: {ask, usd, cur}. A row is priced from its
+  // order book when that came back in the sack's currency, else from Search's US price.
+  function rankGems(items, apps, sack) {
+    const rows = [];
+    for (const h in items || {}) {
+      const it = items[h], g = apps && apps[it.a];
+      const gems = g && (g.foil || (g.card ? g.card * FOIL_TIMES : 0));
+      if (!gems) continue;
+      const booked = !!(it.b && sack && sack.ask && it.b.cur === sack.cur && it.b.a > 0);
+      const ask = booked ? it.b.a : it.u;
+      const base = booked ? sack.ask : sack && sack.usd;
+      if (!(ask > 0) || !(base > 0)) continue;
+      const perK = perThousand(ask, gems);
+      rows.push({ h, it, gems, ask, perK, vs: perK / base, booked, under: booked ? underSack(it.b.q, gems, sack.ask) : null });
+    }
+    return rows.sort((x, y) => x.vs - y.vs || y.it.l - x.it.l);
+  }
   // --- end helpers ---
 
   const RANGES = [['7d', 7], ['30d', 30], ['1y', 365], ['All', 0]];
@@ -854,6 +917,8 @@
     .sct-big { display: flex; align-items: center; gap: 8px; color: ${AMBER}; font-size: 22px; line-height: 28px; }
     .sct-cb p { margin: 5px 0 0; color: #a9b4bd; }
     .sct-cb p b { color: ${LIGHT}; font-weight: normal; }
+    .sct-cb p.sct-gemline { margin: 0 0 7px; padding: 0 0 7px; border-bottom: 1px solid #2a3f5a; }
+    .sct-t tr.sct-rough td { color: ${GREY}; }
     .sct-acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
     .sct-packs { margin: 18px 0; background: #16202d; border: 1px solid #2a3f5a; border-radius: 4px; color: ${LIGHT};
                  font: 13px/1.4 "Motiva Sans", Arial, sans-serif; text-align: left; }
@@ -2590,6 +2655,11 @@
 
   async function runScan() {
     if (scan.running) return;
+    if (gemJob.running) {
+      scan.error = 'The gem scan is running. Let it finish or stop it first: one scan at a time keeps Steam from refusing lookups.';
+      drawStatus();
+      return;
+    }
     const o = opts(), data = loadScan(), state = { refused: 0 };
     Object.assign(scan, { running: true, stop: false, done: 0, total: 0, note: 'Finding the most-traded cards…', error: '' });
     drawStatus();
@@ -2677,7 +2747,14 @@
     addStyle();
     dash = el('div', { class: 'sct-dash' }, el('div', { class: 'sct-dash-in' },
       el('div', { class: 'sct-dh' }, el('h1', { text: 'Card Trader' }),
-        el('a', { class: 'sct-btn sct-go', onclick: () => { if (scan.running) scan.stop = true; else runScan(); drawStatus(); } }),
+        el('a', { class: 'sct-btn sct-go', onclick: () => {
+          // The button runs whichever scan the open tab belongs to.
+          const job = view.tab === 'gems' ? gemJob : scan;
+          if (job.running) job.stop = true;
+          else if (job === gemJob) runGems();
+          else runScan();
+          drawStatus();
+        } }),
         el('a', { class: 'sct-btn', text: 'Close', onclick: closeDash })),
       el('div', { class: 'sct-status' }), el('div', { class: 'sct-bar' }, el('i')), el('div', { class: 'sct-notes' }),
       el('div', { class: 'sct-tabs' }), el('div', { class: 'sct-view' })));
@@ -2697,6 +2774,7 @@
 
   function drawStatus() {
     if (!dash) return;
+    if (view.tab === 'gems') return drawGemStatus();
     const d = loadScan(), o = opts(), w = wallet(), n = Object.keys(d.cards).length;
     const go = dash.querySelector('.sct-go');
     go.textContent = scan.running ? (scan.stop ? 'Stopping…' : 'Stop the scan') : n ? 'Scan again' : 'Scan';
@@ -2726,7 +2804,8 @@
   }
 
   function drawTabs() {
-    const defs = [['buy', `Orders worth placing (${buyRows().length})`], ['paid', `What you paid (${Object.keys(ledger()).length})`], ['set', 'Settings']];
+    const defs = [['buy', `Orders worth placing (${buyRows().length})`], ['gems', `Cheap gems (${gemJob.running ? 'scanning' : gemWins()})`],
+      ['paid', `What you paid (${Object.keys(ledger()).length})`], ['set', 'Settings']];
     dash.querySelector('.sct-tabs').replaceChildren(...defs.map(([key, label]) =>
       el('a', { class: view.tab === key ? 'active' : '', text: label, onclick: () => { view.tab = key; drawDash(); } })));
   }
@@ -2739,6 +2818,7 @@
     v.replaceChildren();
     if (view.tab === 'paid') drawLedger(v);
     else if (view.tab === 'set') drawSettings(v);
+    else if (view.tab === 'gems') drawGems(v);
     else drawBuy(v);
   }
 
@@ -2747,6 +2827,7 @@
     if (!dash) return;
     drawTabs();
     if (view.tab === 'buy') drawTable();
+    else if (view.tab === 'gems') drawGemTable();
   }
 
   function drawBuy(v) {
@@ -2861,6 +2942,395 @@
         'which is why the range starts at 15.' })));
   }
 
+  // ---- cheap gems ----
+  // Foils whose gems cost less than buying a Sack of Gems. Like the card scan, every lookup goes
+  // out without the Steam sign-in, a few seconds apart, from this browser, so a VPN carries them.
+  // It only reads: buying is left to the person, on each foil's own page.
+  const gemJob = { running: false, stop: false, done: 0, total: 0, note: '', error: '', what: 'gem scan', draw: () => drawStatus() };
+  // [default, lowest allowed]. foilMax is in US cents, the currency Search answers in.
+  const GEM_OPTS = { foilMax: [25, 3], foils: [3000, 100], books: [60, 5] };
+  const GEM_FRESH = 3600000;
+  const GOO_TTL = 30 * DAY;
+  // How much dearer than a Sack a foil may look on Search's US price and still get its order book read.
+  const GEM_SLACK = 1.05;
+  const GEM_COLS = [
+    ['name', 'Foil', ''],
+    ['gems', 'Gems', 'What one turns into. A foil is worth ten times its game\'s cards.'],
+    ['ask', 'Cheapest', 'The cheapest listing. "≈" marks a price from Search, in US dollars, before the order book was read.'],
+    ['perK', 'Per 1000 gems', 'The cheapest listing ÷ its gems × 1000, to set beside a Sack of Gems, which is 1000 gems.'],
+    ['vs', 'Against a Sack', 'How much less its gems cost than a Sack of Gems at the Sack\'s cheapest listing. Plus means dearer.'],
+    ['under', 'Cheaper than a Sack', 'How many are listed at prices whose gems still cost less than a Sack, and the gems they make.'],
+    ['l', 'Listed', 'Listings on the market.'],
+    ['', '', ''],
+  ];
+  const gemView = { sort: 'vs', dir: 1, text: '' };
+  let gemData = null, gooData = null;
+
+  function gemOpts() {
+    const saved = readJson('sct.gemopts', {}), o = {};
+    for (const k in GEM_OPTS) {
+      const v = Number(saved[k]);
+      o[k] = Math.round(isFinite(v) && saved[k] != null && saved[k] !== '' ? Math.max(GEM_OPTS[k][1], v) : GEM_OPTS[k][0]);
+    }
+    o.foils = Math.min(10000, o.foils);
+    o.books = Math.min(300, o.books);
+    return o;
+  }
+
+  function setGemOpt(key, value) {
+    const o = readJson('sct.gemopts', {});
+    o[key] = value;
+    writeJson('sct.gemopts', o);
+  }
+
+  // The last gem scan: {t, cur, sack: {ask, bid, cur, usd, ucur, t}, listed, max, ucur, items: {hash: item}}.
+  // An item is {a: appid, u: Search's price in cents, l: listings, n: name, g: game, b: order book}.
+  function loadGems() {
+    if (!gemData) gemData = readJson('sct.gems', null) || { t: 0, cur: 0, sack: null, items: {} };
+    return gemData;
+  }
+
+  // If the whole scan does not fit in local storage, keep the cheapest foils that fit.
+  function saveGems() {
+    const d = loadGems();
+    if (writeJson('sct.gems', d)) return;
+    const all = d.items;
+    let keep = Object.keys(all).sort((x, y) => all[x].u - all[y].u);
+    while (keep.length > 50) {
+      keep = keep.slice(0, keep.length >> 1);
+      d.items = {};
+      for (const h of keep) d.items[h] = all[h];
+      if (writeJson('sct.gems', d)) return;
+    }
+  }
+
+  // Each game's gem values, by appid: {t, p: {item type: value}, card, bg, ct: a card's item type,
+  // foil: a foil's value from Steam}. Kept 30 days: Steam rarely changes them.
+  function loadGoo() {
+    if (!gooData) {
+      gooData = readJson('sct.goo', {});
+      const cut = Date.now() - GOO_TTL;
+      for (const a in gooData) if (!(gooData[a] && gooData[a].t >= cut)) delete gooData[a];
+    }
+    return gooData;
+  }
+
+  function saveGoo() {
+    writeJson('sct.goo', loadGoo());
+  }
+
+  // What Steam says one item type of a game turns into.
+  async function gooValue(appid, type, border) {
+    const url = `${location.origin}/auction/ajaxgetgoovalueforitemtype/?appid=${appid}&item_type=${type}&border_color=${border}`;
+    const res = await fetch(url, { credentials: 'omit', cache: 'no-store' });
+    if (res.status === 429 || res.status === 403) {
+      const e = new Error(`Steam is refusing lookups for now (${res.status}).`);
+      e.rate = true;
+      throw e;
+    }
+    if (!res.ok) throw new Error(`Steam answered ${res.status}.`);
+    const body = await res.json();
+    if (!body || Number(body.success) !== 1) throw new Error('Steam sent no gem value.');
+    const v = parseInt(body.goo_value, 10);
+    return isFinite(v) && v > 0 ? v : 0;
+  }
+
+  const maxOf = p => Math.max(0, ...Object.values(p || {}));
+
+  // Try a game's item types until its card value shows, or until it is plain that its foils at
+  // `cents` cannot beat a Sack at `sack` cents per 1000 gems. Progress is kept as it goes, so a
+  // try that Steam refused carries on where it stopped.
+  async function probeApp(appid, cents, sack, ask) {
+    const goo = loadGoo();
+    const rec = goo[appid] || (goo[appid] = { t: Date.now(), p: {} });
+    for (const type of GOO_TYPES) {
+      if (rec.card) return rec;
+      const seen = maxOf(rec.p);
+      if (seen && !foilCouldPay(cents, seen, sack)) return rec;
+      if (!(type in rec.p)) rec.p[type] = await ask(appid, type, 0);
+      const cls = gooClasses(Object.values(rec.p));
+      if (cls) {
+        rec.card = cls.card;
+        rec.bg = cls.bg;
+        rec.ct = Number(Object.keys(rec.p).find(k => rec.p[k] === cls.card));
+      }
+    }
+    return rec;
+  }
+
+  // Whether a game needs more lookups for foils as cheap as `cents`.
+  function gooNeeded(rec, cents, sack) {
+    if (!rec) return true;
+    if (rec.card) return false;
+    const seen = maxOf(rec.p);
+    if (seen && !foilCouldPay(cents, seen, sack)) return false;
+    return GOO_TYPES.some(t => !(t in rec.p));
+  }
+
+  async function runGems() {
+    if (gemJob.running) return;
+    if (scan.running) {
+      gemJob.error = 'The card scan is running. Let it finish or stop it first: one scan at a time keeps Steam from refusing lookups.';
+      drawStatus();
+      return;
+    }
+    const o = opts(), go = gemOpts(), d = loadGems(), goo = loadGoo(), state = { refused: 0, job: gemJob };
+    // Each lookup waits until the gap since the last one has passed. Gem values are much smaller
+    // answers than a page of Search, so they go at twice the pace.
+    let last = 0;
+    const paced = async (seconds, fn) => {
+      const wait = last + seconds * 1000 - Date.now();
+      if (wait > 0) await hold(wait / 1000, null, gemJob);
+      try { return await fn(); } finally { last = Date.now(); }
+    };
+    const call = (path, method, ...args) => paced(o.gap, () => marketCall(true, path, method, ...args));
+    const ask = (appid, type, border) => paced(Math.max(1, o.gap / 2), () => gooValue(appid, type, border));
+    Object.assign(gemJob, { running: true, stop: false, done: 0, total: 0, note: 'What a Sack of Gems costs', error: '' });
+    drawStatus();
+    drawView();
+    try {
+      // A Sack of Gems: its order book, in the currency Steam answers in here, and its US price on
+      // Search, which is what the foils are first measured against.
+      const ob = await lookup(state, () => call('/market/orderbook', 'Load', 753, SACK_HASH));
+      const book = ob && ob.success && ob.data, tops = bookTops(book);
+      if (!tops.ask) throw new Error('Steam sent no listings for Sacks of Gems, so gems cannot be priced. Try again later.');
+      const sp = await lookup(state, () => call('/market/actions', 'Search', {
+        appid: 753, strQuery: 'Sack of Gems', filters: { item_class: ['item_class_7'] }, accessoryFilters: {}, sort: 4, direction: 2, count: 10, start: 0,
+      }));
+      const sr = ((sp && sp.results) || []).find(r => r && r.strHash === SACK_HASH);
+      const usd = sr ? Math.round((parseMoney(sr.strMinSellSubtotal) || 0) * 100) : 0;
+      if (!(usd > 0)) throw new Error('Search did not show what a Sack of Gems costs. Try again later.');
+      d.sack = { ask: tops.ask, bid: tops.bid, cur: book.eCurrency, usd, ucur: sr.eCurrency || 1, t: Date.now() };
+      d.cur = book.eCurrency;
+      // The cheapest foils, unless a scan in the last hour already listed them.
+      if (!(d.listed && Date.now() - d.listed < GEM_FRESH && d.max === go.foilMax && d.cap === go.foils && Object.keys(d.items).length)) {
+        const items = {};
+        let total = 0;
+        for (let start = 0; start < go.foils; start += 100) {
+          gemJob.note = `Listing foils under ${centsText(d.sack.ucur, go.foilMax)} · ${Object.keys(items).length.toLocaleString()} so far` +
+            (total ? ` of ${Math.min(total, go.foils).toLocaleString()}` : '');
+          drawStatus();
+          const page = await lookup(state, () => call('/market/actions', 'Search', {
+            appid: 753, strQuery: '', filters: { item_class: ['item_class_2'], cardborder: ['cardborder_1'] },
+            price: { eCurrency: 1, unMin: 0, unMax: go.foilMax }, accessoryFilters: {}, sort: 3, direction: 1, count: 100, start,
+          }));
+          const rows = (page && page.results) || [];
+          total = (page && page.total_count) || total;
+          for (const r of rows) {
+            const a = parseInt(String((r && r.strHash) || '').split('-')[0], 10);
+            const u = Math.round((parseMoney(r && r.strMinSellSubtotal) || 0) * 100);
+            if (!(a > 0) || !(u > 0) || !(r.cSellOrders > 0)) continue;
+            const desc = r.asset_description || {}, old = d.items[r.strHash];
+            items[r.strHash] = { a, u, l: r.cSellOrders, n: desc.name || r.strHash, g: unescapeHtml(String(desc.type || '').replace(/ Foil Trading Card$/, '')),
+                                 b: old && old.b };
+            if (r.eCurrency) d.ucur = r.eCurrency;
+          }
+          if (rows.length < 100 || start + rows.length >= total) break;
+        }
+        Object.assign(d, { items, listed: Date.now(), max: go.foilMax, cap: go.foils });
+        saveGems();
+      }
+      // What each game's foils turn into, cheapest first. Most games take one lookup: its answer
+      // is often enough to show that foils at that price cannot beat a Sack.
+      const cheapest = new Map(), names = new Map();
+      for (const h in d.items) {
+        const it = d.items[h];
+        if (!(cheapest.get(it.a) <= it.u)) { cheapest.set(it.a, it.u); names.set(it.a, it.g); }
+      }
+      const apps = [...cheapest.entries()].sort((x, y) => x[1] - y[1]);
+      gemJob.total = apps.length;
+      let failed = 0;
+      for (const [appid, cents] of apps) {
+        if (gooNeeded(goo[appid], cents, d.sack.usd)) {
+          gemJob.note = names.get(appid) || `App ${appid}`;
+          drawStatus();
+          try {
+            await lookup(state, () => probeApp(appid, cents, d.sack.usd, ask));
+            failed = 0;
+          } catch (e) {
+            if (e === STOP || e.fatal) throw e;
+            if (++failed >= 5) throw new Error(`Five lookups failed in a row (${e.message}). Check the connection, then scan again.`);
+          }
+        }
+        gemJob.done++;
+        if (gemJob.done % 10 === 0) { saveGoo(); drawView(); }
+        drawStatus();
+      }
+      saveGoo();
+      // The foils that look cheapest on Search's prices: their order books, and the foil value
+      // straight from Steam rather than worked out from the card's.
+      const pre = rankGems(d.items, goo, { usd: d.sack.usd }).filter(r => r.vs < GEM_SLACK).slice(0, go.books);
+      gemJob.total += pre.length;
+      for (const r of pre) {
+        const it = r.it, rec = goo[it.a];
+        gemJob.note = `${it.g} · ${it.n}`;
+        drawStatus();
+        try {
+          if (rec && rec.card && !rec.foil && rec.ct) {
+            const f = await lookup(state, () => ask(it.a, rec.ct, 1));
+            rec.foil = f > 0 ? f : rec.card * FOIL_TIMES;
+          }
+          if (!(it.b && Date.now() - it.b.t < GEM_FRESH && it.b.cur === d.sack.cur)) {
+            const res = await lookup(state, () => call('/market/orderbook', 'Load', 753, r.h));
+            const bk = res && res.success && res.data;
+            if (bk) it.b = { a: bookTops(bk).ask || 0, q: (bk.rgCompactSellOrders || []).slice(0, 40), cur: bk.eCurrency, t: Date.now() };
+          }
+          failed = 0;
+        } catch (e) {
+          if (e === STOP || e.fatal) throw e;
+          if (++failed >= 5) throw new Error(`Five lookups failed in a row (${e.message}). Check the connection, then scan again.`);
+        }
+        gemJob.done++;
+        drawView();
+        drawStatus();
+      }
+      d.t = Date.now();
+    } catch (e) {
+      if (e !== STOP) gemJob.error = e.message;
+    }
+    saveGoo();
+    saveGems();
+    Object.assign(gemJob, { running: false, stop: false, note: '' });
+    drawDash();
+  }
+
+  // The rows worth showing: cheaper than a Sack on their order books, or, where the book is not
+  // read yet, close enough on Search's US price to be worth a look. Then the filter.
+  function gemRows() {
+    const d = loadGems();
+    if (!d.sack) return [];
+    const text = gemView.text;
+    const rows = rankGems(d.items, loadGoo(), d.sack).filter(r => r.vs < (r.booked ? 1 : GEM_SLACK) &&
+      (!text || `${r.it.n} ${r.it.g}`.toLowerCase().includes(text)));
+    const key = gemView.sort;
+    const val = r => (key === 'name' ? r.it.n.toLowerCase() : key === 'under' ? (r.under ? r.under.gems : -1) : key === 'l' ? r.it.l : r[key]);
+    return rows.sort((a, b) => {
+      const x = val(a), y = val(b);
+      return (x < y ? -1 : x > y ? 1 : 0) * gemView.dir || a.vs - b.vs;
+    });
+  }
+
+  // How many foils beat a Sack on their order books.
+  function gemWins() {
+    const d = loadGems();
+    return d.sack ? rankGems(d.items, loadGoo(), d.sack).filter(r => r.booked && r.vs < 1).length : 0;
+  }
+
+  function drawGemStatus() {
+    const d = loadGems(), w = wallet(), o = opts(), go = gemOpts(), n = Object.keys(d.items).length;
+    const btn = dash.querySelector('.sct-go');
+    btn.textContent = gemJob.running ? (gemJob.stop ? 'Stopping…' : 'Stop the scan') : d.t || n ? 'Scan again' : 'Find cheap gems';
+    btn.classList.toggle('go', !gemJob.running);
+    let text;
+    if (gemJob.running) {
+      text = gemJob.total ? `Looking up ${gemJob.done} of ${gemJob.total}` : '';
+      if (gemJob.note) text += (text ? ' · ' : '') + gemJob.note;
+    } else if (gemJob.error) {
+      text = gemJob.error;
+    } else if (d.t || n) {
+      const when = new Date(d.t || d.listed || Date.now()).toLocaleString([], { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+      text = `Last gem scan ${when} · ${n.toLocaleString()} foils under ${centsText(d.ucur || 1, d.max || go.foilMax)} · prices in ${currencyOf(d.cur)[2]}`;
+    } else {
+      const guess = go.foils / 100 * o.gap + go.foils * 0.4 * 1.3 * Math.max(1, o.gap / 2) + go.books * 1.5 * o.gap;
+      text = `No gem scan yet. It lists the ${go.foils.toLocaleString()} cheapest foils, finds what each one's game turns foils into, ` +
+        `and reads the order books of the best ${go.books}. Roughly ${fmtSpan(guess)}, depending on how many games there are.`;
+    }
+    dash.querySelector('.sct-status').textContent = text;
+    dash.querySelector('.sct-bar i').style.width = gemJob.running && gemJob.total ? `${gemJob.done / gemJob.total * 100}%` : '0';
+    const notes = [];
+    if (d.cur && w.cur && d.cur !== w.cur) {
+      notes.push(`These prices are in ${currencyOf(d.cur)[2]}, not your wallet's ${currencyOf(w.cur)[2]}: Steam saw the scan come from another ` +
+        `country, which is what a VPN does. The ranking still holds. Each foil's page works out its gems in ${currencyOf(w.cur)[2]}, ` +
+        `where the smallest prices can round up a cent or two. Turn the VPN off before you buy.`);
+    }
+    if (gemJob.running) notes.push('Keep this tab in view while it scans. Browsers slow a hidden tab to about one lookup a minute.');
+    dash.querySelector('.sct-notes').replaceChildren(...notes.map(t => el('div', { class: 'sct-note', text: t })));
+  }
+
+  function drawGems(v) {
+    const d = loadGems(), go = gemOpts(), s = d.sack;
+    const num = (key, label) => el('label', { class: 'sct-dim' }, label + ' ',
+      el('input', { type: 'number', min: GEM_OPTS[key][1], value: go[key], 'aria-label': label,
+                    onchange: e => { setGemOpt(key, parseFloat(e.target.value)); drawDash(); } }));
+    const text = el('input', { type: 'search', placeholder: 'Foil or game', 'aria-label': 'Filter by foil or game', value: gemView.text,
+                               oninput: e => { gemView.text = e.target.value.trim().toLowerCase(); drawGemTable(); } });
+    const sack = s ? [el('span', {}, 'A Sack of Gems (1000 gems): ', el('b', { text: centsText(s.cur, s.ask) }),
+      s.bid ? ` listed, ${centsText(s.cur, s.bid)} best buy order.` : ' listed.')] : [];
+    v.append(
+      el('div', { class: 'sct-filters' }, ...sack, text),
+      el('div', { class: 'sct-filters' }, num('foilMax', 'Foils up to (US cents)'), num('foils', 'How many foils'),
+        num('books', 'Order books for the best')),
+      el('div', { class: 'sct-gemwrap' }));
+    drawGemTable();
+  }
+
+  function drawGemTable() {
+    const wrap = dash && dash.querySelector('.sct-gemwrap');
+    if (!wrap) return;
+    const d = loadGems(), rows = gemRows(), n = Object.keys(d.items).length;
+    if (!rows.length) {
+      wrap.replaceChildren(el('div', { class: 'sct-empty', text: gemJob.running ? 'Foils show up here as their games are looked up.'
+        : !n ? 'Nothing scanned yet. Press Find cheap gems.'
+        : `None of the ${n.toLocaleString()} foils on file turns into gems for less than a Sack costs. Scan again later, or raise how many foils it looks at.` }));
+      return;
+    }
+    const sortBy = key => {
+      if (gemView.sort === key) gemView.dir = -gemView.dir;
+      else { gemView.sort = key; gemView.dir = key === 'vs' || key === 'perK' || key === 'ask' || key === 'name' ? 1 : -1; }
+      drawGemTable();
+    };
+    const head = el('tr', {}, GEM_COLS.map(([key, label, tip]) => el('th', {
+      class: gemView.sort === key && key ? 'sorted' : '', title: tip, onclick: key ? () => sortBy(key) : null,
+      text: label + (gemView.sort === key && key ? (gemView.dir < 0 ? ' ▾' : ' ▴') : ''),
+    })));
+    const body = rows.slice(0, 400).map(r => {
+      const cur = r.booked ? d.sack.cur : d.sack.ucur || 1;
+      const $ = c => (r.booked ? '' : '≈ ') + centsText(cur, Math.round(c));
+      const pct = Math.round((r.vs - 1) * 100);
+      return el('tr', { class: r.booked ? '' : 'sct-rough' },
+        el('td', { class: 'name', title: `${r.it.n} · ${r.it.g}` },
+          el('a', { href: cardUrl(r.h), target: '_blank', rel: 'noopener', text: r.it.n }), el('i', { text: r.it.g })),
+        el('td', {}, el('b', { text: String(r.gems) })),
+        el('td', { text: $(r.ask) }),
+        el('td', {}, el('b', { text: $(r.perK) })),
+        el('td', { class: pct < 0 ? 'sct-ok' : 'sct-dim', text: pct < 0 ? `${pct}%` : pct > 0 ? `+${pct}%` : 'the same' }),
+        el('td', { text: r.under ? (r.under.units ? `${r.under.units.toLocaleString()} · ${r.under.gems.toLocaleString()} gems` : 'none') : '' }),
+        el('td', { text: r.it.l.toLocaleString() }),
+        el('td', {}, el('a', { class: 'sct-btn small', href: cardUrl(r.h), target: '_blank', rel: 'noopener', text: 'Open' })));
+    });
+    wrap.replaceChildren(el('table', { class: 'sct-t' }, el('thead', {}, head), el('tbody', {}, body)));
+    if (rows.length > 400) wrap.append(el('div', { class: 'sct-empty', text: `Showing the first 400 of ${rows.length}.` }));
+  }
+
+  // A foil the gem scan priced: its gems, as far as they are known.
+  function gemsOfHash(hash) {
+    const it = loadGems().items[hash], rec = it && loadGoo()[it.a];
+    return rec ? rec.foil || (rec.card ? rec.card * FOIL_TIMES : 0) : 0;
+  }
+
+  // On a foil the gem scan priced, the Sack of Gems to set it against, in the same currency as
+  // the page's own order book (the wallet's, signed in).
+  async function loadGemLine(me) {
+    const gems = gemsOfHash(me.hash);
+    if (!gems) return;
+    try {
+      const ob = await marketCall(false, '/market/orderbook', 'Load', 753, SACK_HASH);
+      const book = ob && ob.success && ob.data, tops = bookTops(book);
+      if (helper === me && tops.ask) { me.gem = { gems, sack: tops.ask, cur: book.eCurrency }; drawHelper(); }
+    } catch (e) { /* the panel works without it */ }
+  }
+
+  function gemLine(me) {
+    const g = me.gem, asks = me.rec && cardOf(me.rec).asks;
+    if (!g || !asks || !asks.length || g.cur !== me.rec.cur) return null;
+    const $ = c => centsText(g.cur, Math.round(c));
+    const perK = perThousand(asks[0].c, g.gems), under = underSack(me.rec.aa, g.gems, g.sack), pct = Math.round((perK / g.sack - 1) * 100);
+    return el('p', { class: 'sct-gemline' }, `Turns into ${g.gems} gems: `, el('b', { text: `${$(perK)} per 1000` }),
+      ` at the cheapest listing, against ${$(g.sack)} for a Sack of Gems (`,
+      el('span', { class: pct < 0 ? 'sct-ok' : 'sct-warn', text: pct < 0 ? `${pct}%` : pct > 0 ? `+${pct}%` : 'the same' }), '). ',
+      under.units ? `${under.units} listed cheaper than a Sack, ${under.gems.toLocaleString()} gems for ${$(under.cost)}.` : 'None listed cheaper than a Sack.');
+  }
+
   // ---- one card's page ----
   function listingHash() {
     const m = /^\/market\/listings\/753\/([^/?#]+)/.exec(location.pathname);
@@ -2893,6 +3363,7 @@
       if (signedIn) learnWallet({ cur: me.rec.cur });
       me.plan = planFlip(cardOf(me.rec), opts(), feesNow());
       drawHelper();
+      loadGemLine(me);
       me.timer = setInterval(watchBuyBox, 500);
       if (signedIn) {
         syncOrders().then(() => { if (helper === me) drawHelper(); }, () => { /* the panel works without it */ });
@@ -2908,7 +3379,7 @@
     if (!me || !me.rec) return;
     const p = me.plan, o = opts(), fees = feesNow(), mine = ledger()[me.hash];
     const $ = c => centsText(me.rec.cur, c);
-    const kids = [];
+    const kids = [gemLine(me)].filter(Boolean);
     if (p) {
       kids.push(el('div', { class: 'sct-big' }, `Buy at ${$(p.buy)}`, el('span', { class: 'sct-tag ' + p.kind, text: KINDS[p.kind] })));
       kids.push(el('p', {}, 'Sell at ', el('b', { text: $(p.sell) }), ', keep ', el('b', { text: $(p.net) }), ' after fees: ',
@@ -3069,8 +3540,8 @@
   // A scan run through a VPN comes back in another currency. If the last one did, see
   // whether the VPN is still on before an order goes in.
   async function checkVpn(me) {
-    const d = loadScan(), w = wallet();
-    if (!d.cur || !w.cur || d.cur === w.cur) return;
+    const w = wallet(), seen = [loadScan().cur, loadGems().cur].filter(Boolean);
+    if (!w.cur || !seen.some(c => c !== w.cur)) return;
     try {
       const ob = await marketCall(true, '/market/orderbook', 'Load', 753, me.hash);
       const cur = ob && ob.data && ob.data.eCurrency;
@@ -3089,9 +3560,10 @@
         seen = hash;
         if (hash) mountHelper(hash); else unmountHelper();
       }
-      if (location.hash === '#card-trader') {
+      if (location.hash === '#card-trader' || location.hash === '#cheap-gems') {
+        if (location.hash === '#cheap-gems') view.tab = 'gems';
         history.replaceState(history.state, '', location.pathname + location.search);
-        openDash();
+        if (dash) drawDash(); else openDash();
       }
     };
     tick();

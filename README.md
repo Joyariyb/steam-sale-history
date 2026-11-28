@@ -167,6 +167,35 @@ only looks up the price of gems. A pack's market name is usually `<appid>-<game>
 When a game has been renamed since its cards came out, the panel finds its pack by searching the
 market instead.
 
+### Cheap gems
+
+Open https://steamcommunity.com/market/#cheap-gems, or the scanner's **Cheap gems** tab, then
+**Find cheap gems**. It looks for foils that turn into gems for less than a Sack of Gems (1000
+gems) costs at its cheapest listing:
+
+1. It reads what a Sack of Gems costs.
+2. It lists the cheapest foils on the market, up to 25 US cents each by default.
+3. It asks Steam what each game's foils turn into, cheapest foils first. Most games take one
+   lookup, because the first answer often shows that their foils cannot beat a Sack.
+4. It reads the order books of the 60 foils that look best, and Steam's own value for each foil.
+
+Each row gives the foil, its gems, its cheapest listing, what 1000 gems cost that way, how much
+less that is than a Sack, and how many are listed at prices that still beat a Sack. Click a
+heading to sort. On the foil's own page, the card panel repeats the sum in your wallet's
+currency. Check that line before you buy: the smallest prices can round up a cent or two in
+A$.
+
+How Steam values items, checked on 20 games on 2026-11-28: all the cards in a game are worth the
+same number of gems, all its backgrounds and emoticons a larger number, and a foil ten times a
+card. A card is worth floor(2 × background ÷ cards in the set). So a foil from a 5-card game
+whose backgrounds are worth 100 gems makes 400 gems, while backgrounds and emoticons never make
+more than about 100. A game's gem values are kept for 30 days and its prices for an hour.
+
+The gem scan and the card scan take turns, so Steam only ever sees one of them at a time. Gems
+made from anything bought on the market carry its 7-day hold (going by a 2024 report on Steam's
+forums), and so does a Sack of Gems bought there. Packs made from untradable gems are untradable,
+so make packs for sale once the hold is over.
+
 ### How an order is worked out
 
 - **Sell price**: the price the dearest quarter of the last 30 days' units sold at or above, on
@@ -182,8 +211,9 @@ so cards under about 10 cents cannot clear the fees. The scan range starts at 15
 
 ### Lookups, rate limits and VPNs
 
-- Scanner lookups are sent without your Steam sign-in, three seconds apart by default. If Steam
-  refuses them, the scan waits 2, 5, then 15 minutes, then stops.
+- Scanner lookups are sent without your Steam sign-in, three seconds apart by default. Gem values
+  are much smaller answers and go twice as fast. If Steam refuses them, the scan waits 2, 5, then
+  15 minutes, then stops.
 - The scan runs in the tab. Keep it in view: browsers slow a hidden tab to about one lookup a
   minute. A stopped scan picks up where it left off if restarted within the hour.
 - Lookups go wherever the browser sends them, so with a browser VPN on they come from the VPN's
@@ -203,6 +233,9 @@ does not go in, the panel says so and shows the number to type.
 The Booster Pack Creator panel was tested against a mock of the creator page, built the way
 Steam's own page script sets it up, with some prices captured from the live market. Where it sits
 on the real page, and that it reads your games and gems there, still need a signed-in look.
+
+The gem scan was tested against a mock of the market's search, order books and gem values, built
+from answers the live market gave on 2026-11-28. It has not yet run on the live market.
 
 ## Development
 
