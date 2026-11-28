@@ -89,7 +89,8 @@ each. Keys are ignored while you type in a field or a Steam dialog is open.
 ## Steam Card Trader
 
 `steam-card-trader.user.js` is a second script in this repo: the Sale History panel above, plus a
-buy side for flipping cards. It is a separate install, so the original keeps working untouched.
+buy side for flipping cards and a ranking of the booster packs worth making. It is a separate
+install, so the original keeps working untouched.
 Run one of the two at a time. If both are on, Card Trader pauses itself in the inventory and says
 so.
 
@@ -136,6 +137,36 @@ Steam here, which is how the inventory later knows what a card cost.
   lists each with its price and what it pays you. Tiles get their price badges. Click a row to
   select that card, then List as usual.
 
+### On the Booster Pack Creator
+
+Open https://steamcommunity.com/tradingcards/boostercreator/ and a panel under Steam's own
+creator ranks every game you can make a pack of by what one pack is worth once its gems are paid
+for. Press **Rank my packs**. It looks up what gems sell for, then each game's pack, one lookup
+each, spaced like the scanner's: a hundred games take about six minutes. Keep the tab in view
+while it runs.
+
+- **Gems**: what a pack costs, and what those gems would fetch sold as a Sack of Gems (1000 gems)
+  to its best buy order, after fees. Making a pack only pays if the pack is worth more than that.
+- **Sell now**: the pack sold straight to its best buy order, less Steam's fees and the gems. The
+  table is ranked by this.
+- **List it**: the same if you list one cent under the cheapest listing and someone buys it.
+  Packs of little-known games are often listed far above anything that sells, so do not go by
+  this column alone.
+- **Sold, 7 days**: for the top ten rows, how many packs sold in the last week, and their median
+  price.
+- Each row says whether the pack **Pays**, pays **Only listed**, **Breaks even** or **Loses
+  money**. A game you made a pack of in the last day is greyed, with the time Steam gives for the
+  next one, and the panel notices as soon as you make one. Click a game for its pack's market
+  page. Click a heading to sort.
+- If some of your gems are untradable, the panel says so: a pack made from them cannot be sold,
+  so choose tradable gems when you make one.
+
+It is research only: it never makes, lists or buys a pack. Make the pack with Steam's own button,
+then sell it from the inventory. Prices are kept for an hour, so ranking again within the hour
+only looks up the price of gems. A pack's market name is usually `<appid>-<game> Booster Pack`.
+When a game has been renamed since its cards came out, the panel finds its pack by searching the
+market instead.
+
 ### How an order is worked out
 
 - **Sell price**: the price the dearest quarter of the last 30 days' units sold at or above, on
@@ -168,6 +199,10 @@ The scanner and the card panel were tested on the live market signed out, and th
 changes against a mock page. Three things need a signed-in look: Steam's buy box taking the price,
 reading your buy orders, and loading a large inventory in full for **Price all**. If the price
 does not go in, the panel says so and shows the number to type.
+
+The Booster Pack Creator panel was tested against a mock of the creator page, built the way
+Steam's own page script sets it up, with some prices captured from the live market. Where it sits
+on the real page, and that it reads your games and gems there, still need a signed-in look.
 
 ## Development
 

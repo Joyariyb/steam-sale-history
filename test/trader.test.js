@@ -8,7 +8,9 @@ const end = src.indexOf('// --- end helpers ---');
 assert(start > 0 && end > start, 'helper markers present');
 const names = ['DAY', 'MIN_ASK', 'RECENT_DAYS', 'HOLD_DAYS', 'CARD_FEES', 'amountToSend', 'receivedForBuyerPays', 'currencyOf',
   'centsText', 'apiPoints', 'popcount', 'priceLevels', 'packLevels', 'unpackLevels', 'unitsOf', 'flow', 'heldPrice',
-  'medianLevel', 'bookLevels', 'askToClear', 'planFlip', 'fmtDays', 'daysText', 'fmtSpan', 'moneyLike', 'parseMoney'];
+  'medianLevel', 'bookLevels', 'askToClear', 'planFlip', 'fmtDays', 'daysText', 'fmtSpan', 'moneyLike', 'parseMoney',
+  'SACK_GEMS', 'SACK_HASH', 'unescapeHtml', 'creatorGames', 'jsonEnd', 'parseCreatorInit', 'boosterHash', 'bookTops', 'gemCents',
+  'packNet', 'packVerdict', 'signedCents', 'recentSales', 'sortPacks', 'rankPacks'];
 const h = new Function(src.slice(start, end) + '\nreturn { ' + names.join(', ') + ' };')();
 const w = h.CARD_FEES;
 
@@ -183,5 +185,143 @@ assert.strictEqual(h.moneyLike('5', 42), '0.42');
 for (const old of ['A$ 0.17', '0,17€', 'CDN$ 12.00', '']) {
   assert.strictEqual(Math.round(h.parseMoney(h.moneyLike(old, 256)) * 100), 256, `reads back from "${old}"`);
 }
+
+// ---- booster packs ----
+
+// Names as Steam writes them into the Booster Pack Creator's catalog.
+assert.strictEqual(h.unescapeHtml('Tom &amp; Jerry'), 'Tom & Jerry');
+assert.strictEqual(h.unescapeHtml('&quot;Q&quot; &lt;3 &#39;s&#039; &#x2122;&#8482;'), '"Q" <3 \'s\' ™™');
+assert.strictEqual(h.unescapeHtml('AT&T &nope; &#0;'), 'AT&T &nope; &#0;');
+assert.strictEqual(h.unescapeHtml(null), '');
+
+// Where a JSON value closes, brackets and escaped quotes inside strings ignored.
+assert.strictEqual(h.jsonEnd('[1,[2],"]"]x', 0), 11);
+assert.strictEqual(h.jsonEnd('{"a":"\\"}"}', 0), 11);
+assert.strictEqual(h.jsonEnd('[1, 2', 0), -1);
+
+// The creator page's own call, the way Steam writes it: the catalog as JSON on one line, with
+// PHP's escaped slashes, then the gem counts, a template full of brackets and commas, and the
+// suggested apps. A game made in the last day carries unavailable and available_at_time.
+const initText = `
+	$J( function() {
+		CBoosterCreatorPage.Init(
+			[{"appid":1042550,"name":"Digimon Story Cyber Sleuth: Complete Edition","series":1,"price":"400"},{"appid":2965680,"name":"Malleus Cocconum: The Heiress","series":1,"price":"667","unavailable":true,"available_at_time":"Nov 29 @ 9:41am"},{"appid":500002,"name":"Tom &amp; Jerry: [Chase], \\"Go\\" A\\/B","series":1,"price":"1,200"},{"appid":"500003","name":"No price","series":1,"price":"x"},{"appid":1042550,"name":"Listed twice","series":1,"price":"400"}],
+			parseFloat( "1345.5" ),
+			1000,
+			345,
+			"<div class=\\"booster_option\\" data-appid=\\"{appid}\\">[{name}], {price}<\\/div>",
+			[1042550, 2965680]
+		);
+	} );`;
+const init = h.parseCreatorInit(initText);
+assert.deepStrictEqual(init.goo, { total: 1345.5, tradable: 1000, untradable: 345 });
+assert.deepStrictEqual(init.games, [
+  { appid: 1042550, gems: 400, series: 1, name: 'Digimon Story Cyber Sleuth: Complete Edition', cool: false, at: '' },
+  { appid: 2965680, gems: 667, series: 1, name: 'Malleus Cocconum: The Heiress', cool: true, at: 'Nov 29 @ 9:41am' },
+  { appid: 500002, gems: 1200, series: 1, name: 'Tom & Jerry: [Chase], "Go" A/B', cool: false, at: '' },
+]);
+assert.strictEqual(h.parseCreatorInit('var g_sessionID = "x";'), null);
+assert.strictEqual(h.parseCreatorInit('CBoosterCreatorPage.Init( rgCatalog, 1, 2, 3 );'), null);
+assert.strictEqual(h.parseCreatorInit('CBoosterCreatorPage.Init( rgCatalog, [1] );'), null);
+assert.strictEqual(h.parseCreatorInit('CBoosterCreatorPage.Init( [{"appid": 1,}], 1, 2, 3 );'), null);
+assert.strictEqual(h.parseCreatorInit('CBoosterCreatorPage.Init( [{"appid":1'), null);
+// Without the gem counts, the games still read.
+assert.deepStrictEqual(h.parseCreatorInit('CBoosterCreatorPage.Init([{"appid":5,"name":"A","price":"400"}]);'),
+  { games: [{ appid: 5, gems: 400, series: 1, name: 'A', cool: false, at: '' }], goo: null });
+
+// Steam's own script keeps the catalog keyed by appid, with its own things added to each entry.
+assert.deepStrictEqual(h.creatorGames({
+  730: { appid: 730, name: 'Counter-Strike 2', series: 1, price: '1200', $Option: { length: 1 } },
+  10: { appid: 10, series: 1, price: 400 },
+}), [
+  { appid: 10, gems: 400, series: 1, name: 'App 10', cool: false, at: '' },
+  { appid: 730, gems: 1200, series: 1, name: 'Counter-Strike 2', cool: false, at: '' },
+]);
+assert.deepStrictEqual(h.creatorGames(null), []);
+assert.deepStrictEqual(h.creatorGames('junk'), []);
+
+assert.strictEqual(h.boosterHash(1042550, 'Digimon Story Cyber Sleuth: Complete Edition'),
+  '1042550-Digimon Story Cyber Sleuth: Complete Edition Booster Pack');
+
+// The top of a book, from Steam's own fields or else its compact levels.
+assert.deepStrictEqual(h.bookTops({ amtMaxBuyOrder: 96, amtMinSellOrder: 98, rgCompactBuyOrders: [96, 360], rgCompactSellOrders: [98, 684] }),
+  { bid: 96, ask: 98 });
+assert.deepStrictEqual(h.bookTops({ amtMaxBuyOrder: 0, rgCompactBuyOrders: [], rgCompactSellOrders: [250, 2, 260, 1] }), { bid: null, ask: 250 });
+assert.deepStrictEqual(h.bookTops(null), { bid: null, ask: null });
+
+// A Sack of Gems with its best buy order at 96 leaves 84 after fees: 0.084 a gem.
+assert.strictEqual(h.SACK_HASH, '753-Sack of Gems');
+const perGem = h.gemCents(96, w);
+assert.strictEqual(perGem, 84 / h.SACK_GEMS);
+assert.strictEqual(h.gemCents(0, w), null);
+
+// Digimon's pack on 2026-11-28: 400 gems, best buy order 124, cheapest listing 176. Sold to the
+// order it keeps 109, less 33.6 of gems; listed at 175 it keeps 153.
+assert.deepStrictEqual(h.packNet(400, 124, 176, perGem, w), { cost: 400 * perGem, keepNow: 109, now: 75, listAt: 175, keepListed: 153, listed: 119 });
+// No buy orders, or no listings.
+let net = h.packNet(400, 0, 250, perGem, w);
+assert.strictEqual(net.now, null);
+assert.strictEqual(net.keepNow, null);
+assert.strictEqual(net.listAt, 249);
+assert.strictEqual(net.listed, 184);
+net = h.packNet(400, 124, 0, perGem, w);
+assert.strictEqual(net.listAt, null);
+assert.strictEqual(net.listed, null);
+assert.strictEqual(net.now, 75);
+// A listing is never put under the best buy order, which would pay more at once.
+assert.strictEqual(h.packNet(500, 48, 49, perGem, w).listAt, 48);
+assert.strictEqual(h.packNet(500, 48, 40, perGem, w).listAt, 48);
+// A loss of under half a cent comes out as zero, not minus zero.
+assert(Object.is(h.packNet(100, 48, 0, 0.424, w).now, 0));
+// 1200 gems for a pack that sells at 30: a loss either way.
+net = h.packNet(1200, 30, 45, perGem, w);
+assert.strictEqual(net.now, -74);
+assert.strictEqual(net.listed, -62);
+
+assert.strictEqual(h.packVerdict({ now: 75, listed: 119 }), 'pays');
+assert.strictEqual(h.packVerdict({ now: -14, listed: 54 }), 'listed');
+assert.strictEqual(h.packVerdict({ now: null, listed: 184 }), 'listed');
+assert.strictEqual(h.packVerdict({ now: 0, listed: 0 }), 'even');
+assert.strictEqual(h.packVerdict({ now: -3, listed: 0 }), 'even');
+assert.strictEqual(h.packVerdict({ now: -74, listed: -62 }), 'loses');
+assert.strictEqual(h.packVerdict({ now: -5, listed: null }), 'loses');
+assert.strictEqual(h.packVerdict({ now: null, listed: null }), null);
+assert.strictEqual(h.packVerdict(null), null);
+
+assert.strictEqual(h.signedCents(21, 75), '+A$0.75');
+assert.strictEqual(h.signedCents(21, -12), '−A$0.12');
+assert.strictEqual(h.signedCents(21, 0), 'A$0.00');
+assert.strictEqual(h.signedCents(3, -105), '−1.05€');
+
+// Last week's sales: units, and the price half of them went at or under.
+assert.deepStrictEqual(h.recentSales([
+  at(1, 1.45, 3), at(2, 1.27, 1), { t: now - 6.9 * h.DAY, p: 1.6, v: 2 }, at(8, 9.99, 50), at(3, 1.1, 0),
+], 7, now), { units: 6, median: 145 });
+assert.deepStrictEqual(h.recentSales([], 7, now), { units: 0, median: null });
+
+// Ranking: what selling to a buy order nets, best first; a tie goes to what listing nets; then
+// packs with only listings; then whatever has nothing to go on, by name.
+const games = [
+  { appid: 1, name: 'Penny', gems: 1200 }, { appid: 2, name: 'Digimon', gems: 400, cool: true }, { appid: 3, name: 'Quiet', gems: 400 },
+  { appid: 4, name: 'Lantern', gems: 600 }, { appid: 5, name: 'Gone', gems: 857 }, { appid: 6, name: 'Unseen', gems: 500 },
+  { appid: 7, name: 'Bracket', gems: 600 }, { appid: 8, name: 'Filler', gems: 545 }, { appid: 9, name: 'Broken', gems: 500 },
+];
+const recs = {
+  1: { b: 30, a: 45 }, 2: { b: 124, a: 176, s7: 23 }, 3: { b: 0, a: 250 }, 4: { b: 40, a: 120 }, 5: { none: true },
+  7: { b: 66, a: 75 }, 8: { b: 62, a: 70 }, 9: { err: 'Steam answered 500.' },
+};
+const ranked = h.rankPacks(games, recs, perGem, w);
+const order = rows => rows.map(x => x.g.name);
+assert.deepStrictEqual(order(ranked), ['Digimon', 'Bracket', 'Filler', 'Lantern', 'Penny', 'Quiet', 'Broken', 'Gone', 'Unseen']);
+assert.deepStrictEqual(ranked.slice(0, 5).map(x => [x.net.now, x.net.listed]), [[75, 119], [9, 15], [9, 14], [-14, 54], [-74, -62]]);
+assert.strictEqual(ranked[0].r, recs[2]);   // the same record, so sales found later stay with it
+assert.deepStrictEqual(ranked.slice(6).map(x => x.net), [null, null, null]);
+assert.deepStrictEqual(order(h.sortPacks(ranked, 'name', 1)), ['Bracket', 'Broken', 'Digimon', 'Filler', 'Gone', 'Lantern', 'Penny', 'Quiet', 'Unseen']);
+assert.deepStrictEqual(order(h.sortPacks(ranked, 'listed', 1)), ['Penny', 'Filler', 'Bracket', 'Lantern', 'Digimon', 'Quiet', 'Broken', 'Gone', 'Unseen']);
+assert.deepStrictEqual(order(h.sortPacks(ranked, 'bid', 1)), ['Penny', 'Lantern', 'Filler', 'Bracket', 'Digimon', 'Quiet', 'Broken', 'Gone', 'Unseen']);
+assert.deepStrictEqual(order(h.sortPacks(ranked, 'sold', -1)), order(ranked));
+assert.deepStrictEqual(order(h.sortPacks(ranked, 'gems', -1)), ['Penny', 'Gone', 'Bracket', 'Lantern', 'Filler', 'Broken', 'Unseen', 'Digimon', 'Quiet']);
+// Without a price for gems nothing nets, so the games come by name.
+assert.deepStrictEqual(order(h.rankPacks(games, recs, null, w)), order(h.sortPacks(ranked, 'name', 1)));
 
 console.log('trader helpers: all passed');
