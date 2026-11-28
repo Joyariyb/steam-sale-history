@@ -10,7 +10,7 @@ const names = ['DAY', 'MIN_ASK', 'RECENT_DAYS', 'HOLD_DAYS', 'CARD_FEES', 'amoun
   'centsText', 'apiPoints', 'popcount', 'priceLevels', 'packLevels', 'unpackLevels', 'unitsOf', 'flow', 'heldPrice',
   'medianLevel', 'bookLevels', 'askToClear', 'planFlip', 'fmtDays', 'daysText', 'fmtSpan', 'moneyLike', 'parseMoney',
   'SACK_GEMS', 'SACK_HASH', 'unescapeHtml', 'creatorGames', 'jsonEnd', 'parseCreatorInit', 'boosterHash', 'bookTops', 'gemCents',
-  'packNet', 'packVerdict', 'signedCents', 'recentSales', 'sortPacks', 'rankPacks'];
+  'packNet', 'packVerdict', 'packMarket', 'packTag', 'signedCents', 'recentSales', 'sortPacks', 'rankPacks'];
 const h = new Function(src.slice(start, end) + '\nreturn { ' + names.join(', ') + ' };')();
 const w = h.CARD_FEES;
 
@@ -288,6 +288,19 @@ assert.strictEqual(h.packVerdict({ now: -5, listed: null }), 'loses');
 assert.strictEqual(h.packVerdict({ now: null, listed: null }), null);
 assert.strictEqual(h.packVerdict(null), null);
 
+// Whether a pack sells on the market. A buy order is enough; without one, it takes a sale in the
+// last week, and until those sales are looked up nothing is said either way.
+assert.strictEqual(h.packMarket(null), null);
+assert.strictEqual(h.packMarket({ err: 'Steam answered 500.' }), null);
+assert.strictEqual(h.packMarket({ none: true }), 'gone');
+assert.strictEqual(h.packMarket({ b: 124, a: 176 }), 'live');
+assert.strictEqual(h.packMarket({ b: 110, a: 0, s7: 0 }), 'live');   // none listed or sold, but the buy order takes one at once
+assert.strictEqual(h.packMarket({ b: 0, a: 250 }), 'unsure');
+assert.strictEqual(h.packMarket({ b: 0, a: 250, s7: 3 }), 'live');
+assert.strictEqual(h.packMarket({ b: 0, a: 250, s7: 0 }), 'unsold');
+assert.strictEqual(h.packMarket({ b: 0, a: 0, s7: 0 }), 'empty');
+assert.strictEqual(h.packMarket({ b: 0, a: 0, s7: 2 }), 'live');
+
 assert.strictEqual(h.signedCents(21, 75), '+A$0.75');
 assert.strictEqual(h.signedCents(21, -12), '−A$0.12');
 assert.strictEqual(h.signedCents(21, 0), 'A$0.00');
@@ -307,7 +320,7 @@ const games = [
   { appid: 7, name: 'Bracket', gems: 600 }, { appid: 8, name: 'Filler', gems: 545 }, { appid: 9, name: 'Broken', gems: 500 },
 ];
 const recs = {
-  1: { b: 30, a: 45 }, 2: { b: 124, a: 176, s7: 23 }, 3: { b: 0, a: 250 }, 4: { b: 40, a: 120 }, 5: { none: true },
+  1: { b: 30, a: 45 }, 2: { b: 124, a: 176, s7: 23 }, 3: { b: 0, a: 250, s7: 3 }, 4: { b: 40, a: 120 }, 5: { none: true },
   7: { b: 66, a: 75 }, 8: { b: 62, a: 70 }, 9: { err: 'Steam answered 500.' },
 };
 const ranked = h.rankPacks(games, recs, perGem, w);
@@ -319,9 +332,38 @@ assert.deepStrictEqual(ranked.slice(6).map(x => x.net), [null, null, null]);
 assert.deepStrictEqual(order(h.sortPacks(ranked, 'name', 1)), ['Bracket', 'Broken', 'Digimon', 'Filler', 'Gone', 'Lantern', 'Penny', 'Quiet', 'Unseen']);
 assert.deepStrictEqual(order(h.sortPacks(ranked, 'listed', 1)), ['Penny', 'Filler', 'Bracket', 'Lantern', 'Digimon', 'Quiet', 'Broken', 'Gone', 'Unseen']);
 assert.deepStrictEqual(order(h.sortPacks(ranked, 'bid', 1)), ['Penny', 'Lantern', 'Filler', 'Bracket', 'Digimon', 'Quiet', 'Broken', 'Gone', 'Unseen']);
-assert.deepStrictEqual(order(h.sortPacks(ranked, 'sold', -1)), order(ranked));
+assert.deepStrictEqual(order(h.sortPacks(ranked, 'sold', -1)), ['Digimon', 'Quiet', 'Bracket', 'Filler', 'Lantern', 'Penny', 'Broken', 'Gone', 'Unseen']);
 assert.deepStrictEqual(order(h.sortPacks(ranked, 'gems', -1)), ['Penny', 'Gone', 'Bracket', 'Lantern', 'Filler', 'Broken', 'Unseen', 'Digimon', 'Quiet']);
 // Without a price for gems nothing nets, so the games come by name.
 assert.deepStrictEqual(order(h.rankPacks(games, recs, null, w)), order(h.sortPacks(ranked, 'name', 1)));
+
+// A pack that does not sell on the market is not set against its gems: it gets no figures, and
+// sits at the bottom by name with a tag saying why. One that pays only once listed is 'stale'
+// when none sold in the last week, like a real pack seen on 2026-11-28: buy orders at 47, one
+// listing at 670, last sold six months before.
+const shelf = [
+  { appid: 1, name: 'Wanted', gems: 400 }, { appid: 2, name: 'Unsold', gems: 400 }, { appid: 3, name: 'Empty', gems: 400 },
+  { appid: 4, name: 'Pending', gems: 400 }, { appid: 5, name: 'Seller', gems: 400 }, { appid: 6, name: 'Gone', gems: 400 },
+  { appid: 7, name: 'Mermaid', gems: 600 },
+];
+const onShelf = h.rankPacks(shelf, {
+  1: { b: 110, a: 0, s7: 0 }, 2: { b: 0, a: 9900, s7: 0 }, 3: { b: 0, a: 0, s7: 0 }, 4: { b: 0, a: 300 }, 5: { b: 0, a: 180, s7: 4 }, 6: { none: true },
+  7: { b: 47, a: 670, s7: 0 },
+}, perGem, w);
+assert.deepStrictEqual(onShelf.map(x => [x.g.name, x.market, h.packTag(x)]), [
+  ['Wanted', 'live', 'pays'], ['Mermaid', 'live', 'stale'], ['Seller', 'live', 'listed'], ['Empty', 'empty', 'empty'], ['Gone', 'gone', 'gone'],
+  ['Pending', 'unsure', null], ['Unsold', 'unsold', 'unsold'],
+]);
+// A buy order of 110 keeps 97 after fees, listing at 179 keeps 157; the gems cost 33.6. For
+// Mermaid, 47 keeps 41 and listing at 669 would keep 582, against 50.4 of gems.
+assert.deepStrictEqual([onShelf[0].net.now, onShelf[0].net.listed, onShelf[2].net.now, onShelf[2].net.listed], [63, null, null, 123]);
+assert.deepStrictEqual([onShelf[1].net.now, onShelf[1].net.listed], [-9, 532]);
+assert.deepStrictEqual(onShelf.slice(3).map(x => x.net), [null, null, null, null]);
+// Only listing needs sales to back it: a buy order that pays does not.
+const mermaid = onShelf[1];
+assert.strictEqual(h.packTag(Object.assign({}, mermaid, { r: { b: 47, a: 670, s7: 2 } })), 'listed');
+assert.strictEqual(h.packTag(Object.assign({}, mermaid, { r: { b: 47, a: 670 } })), 'listed');   // sales not looked up
+assert.strictEqual(h.packTag({ market: 'live', r: { b: 124, a: 176, s7: 0 }, net: { now: 75, listed: 119 } }), 'pays');
+assert.strictEqual(h.packTag({ market: 'live', r: { b: 30, a: 45, s7: 0 }, net: { now: -74, listed: -62 } }), 'loses');
 
 console.log('trader helpers: all passed');

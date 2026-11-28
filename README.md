@@ -150,11 +150,15 @@ while it runs.
 - **Sell now**: the pack sold straight to its best buy order, less Steam's fees and the gems. The
   table is ranked by this.
 - **List it**: the same if you list one cent under the cheapest listing and someone buys it.
-  Packs of little-known games are often listed far above anything that sells, so do not go by
-  this column alone.
-- **Sold, 7 days**: for the top ten rows, how many packs sold in the last week, and their median
-  price.
-- Each row says whether the pack **Pays**, pays **Only listed**, **Breaks even** or **Loses
+  Packs of little-known games are often listed far above anything that sells, so a pack that
+  pays only this way counts only if some sold in the last week.
+- **Sold, 7 days**: how many packs sold in the last week, and their median price. It is looked
+  up for the top ten rows, and for every pack with no buy orders or that pays only if listed.
+- Only a pack that sells on the market is ranked: someone has a buy order for it, or some sold
+  in the last week. A pack the market has none of, or that nobody is selling or buying, is tagged
+  **Not on the market** and sits at the bottom of the table. One that is listed but would only
+  pay on a listing, with none sold in the last week, is tagged **Not selling**.
+- Each pack that sells says whether it **Pays**, pays **Only listed**, **Breaks even** or **Loses
   money**. A game you made a pack of in the last day is greyed, with the time Steam gives for the
   next one, and the panel notices as soon as you make one. Click a game for its pack's market
   page. Click a heading to sort.
@@ -162,8 +166,9 @@ while it runs.
   so choose tradable gems when you make one.
 
 It is research only: it never makes, lists or buys a pack. Make the pack with Steam's own button,
-then sell it from the inventory. Prices are kept for an hour, so ranking again within the hour
-only looks up the price of gems. A pack's market name is usually `<appid>-<game> Booster Pack`.
+then sell it from the inventory. A pack with buy orders but none listed still sells at once to
+the best buy order. Prices are kept for an hour, so ranking again within the hour only looks up
+the price of gems. A pack's market name is usually `<appid>-<game> Booster Pack`.
 When a game has been renamed since its cards came out, the panel finds its pack by searching the
 market instead.
 

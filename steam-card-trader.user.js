@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam Card Trader
 // @namespace    joey.steam-tools
-// @version      1.1.0
+// @version      1.1.1
 // @description  Buy side and sell side for trading cards. On the market: a scanner that ranks cards worth a buy order after fees, and a helper on each card's page that sets the price in Steam's buy dialog. In the inventory: Sale History's panel, with the lowest price that still profits on what you paid, and a scan that prices every card you hold. On the Booster Pack Creator: which of your games makes a pack worth more than its gems.
 // @author       Joey
 // @homepageURL  https://github.com/Joyariyb/steam-sale-history
@@ -600,6 +600,28 @@
     return best === 0 ? 'even' : 'loses';
   }
 
+  // Whether a looked-up pack sells on the market. 'live' when someone has a buy order for it, or
+  // some sold in the last week. 'gone' when the market has no packs of the game at all. 'empty'
+  // when nobody is selling or buying it and none sold in the last week. 'unsold' when it is
+  // listed, but nobody has a buy order and none sold in the last week. 'unsure' when there are
+  // no buy orders and last week's sales are not looked up yet. null when it is not looked up.
+  function packMarket(r) {
+    if (!r || r.err) return null;
+    if (r.none) return 'gone';
+    if (r.b > 0) return 'live';
+    if (r.s7 == null) return 'unsure';
+    if (r.s7 > 0) return 'live';
+    return r.a > 0 ? 'unsold' : 'empty';
+  }
+
+  // A row's tag: what its pack nets, or why it is not ranked. A pack that pays only once listed
+  // is 'stale' when none sold in the last week: its listings are not selling.
+  function packTag(x) {
+    if (x.market === 'gone' || x.market === 'empty' || x.market === 'unsold') return x.market;
+    const v = packVerdict(x.net);
+    return v === 'listed' && x.r.s7 === 0 ? 'stale' : v;
+  }
+
   // "+A$0.75", "−A$0.12", "A$0.00".
   function signedCents(code, cents) {
     return (cents > 0 ? '+' : cents < 0 ? '−' : '') + centsText(code, Math.abs(cents));
@@ -642,14 +664,15 @@
     });
   }
 
-  // Each of the creator's games with its looked-up pack and what a pack nets, best first.
-  // recs, by appid: {b: best buy order, a: cheapest listing, in cents}, or {err} or {none}
-  // when there is no order book to go on.
+  // Each of the creator's games with its looked-up pack, whether that pack sells on the market,
+  // and what a pack nets, best first. Only a pack that sells is set against its gems. recs, by
+  // appid: {b: best buy order, a: cheapest listing, in cents, s7: units sold in the last week
+  // once looked up}, or {err} or {none} when there is no order book to go on.
   function rankPacks(games, recs, perGem, w) {
     const rows = games.map(g => {
-      const r = (recs && recs[g.appid]) || null;
-      const net = r && !r.err && !r.none && perGem != null ? packNet(g.gems, r.b, r.a, perGem, w) : null;
-      return { g, r, net };
+      const r = (recs && recs[g.appid]) || null, market = packMarket(r);
+      const net = market === 'live' && perGem != null ? packNet(g.gems, r.b, r.a, perGem, w) : null;
+      return { g, r, market, net };
     });
     return sortPacks(rows, 'now', -1);
   }
@@ -870,6 +893,7 @@
     .sct-pfoot { margin: 10px 0 0; color: ${GREY}; font-size: 12px; }
     .sct-bad { color: #e06b5c; }
     .sct-tag.lose { color: #e06b5c; border-color: #6b2f28; background: rgba(224,107,92,.1); }
+    .sct-tag.off { color: ${GREY}; border-color: ${SLATE}; border-style: dashed; }
   `;
 
   function addStyle() {
@@ -3113,7 +3137,7 @@
     ['now', 'Sell now', 'Sold to that buy order: what you keep after Steam\'s fees, less what the gems are worth.'],
     ['ask', 'Listing', 'The cheapest pack for sale, and how many are listed.'],
     ['listed', 'List it', 'Listed one cent under the cheapest listing: what you keep after fees, less the gems, once it sells.'],
-    ['sold', 'Sold, 7 days', `Packs sold in the last 7 days, and the price half of them went at or under. Looked up for the top ${PACK_TOP} rows.`],
+    ['sold', 'Sold, 7 days', `Packs sold in the last 7 days, and the price half of them went at or under. Looked up for the top ${PACK_TOP} rows, and for every pack with no buy orders or that pays only if listed.`],
     ['', '', ''],
   ];
   const VERDICTS = {
@@ -3121,6 +3145,10 @@
     listed: ['top', 'Only listed', 'No buy order pays enough to cover the gems. Listed, it pays, but only once someone buys it.'],
     even: ['wait', 'Breaks even', 'A pack fetches about what its gems would.'],
     loses: ['lose', 'Loses money', 'The gems are worth more sold as gems than made into this pack.'],
+    gone: ['off', 'Not on the market', 'Steam\'s market has no packs of this game. A pack you make would have no one to sell to.'],
+    empty: ['off', 'Not on the market', 'Nobody is selling or buying this pack, and none sold in the last 7 days. A pack you make would have no one to sell to.'],
+    unsold: ['off', 'Not selling', 'Some are listed, but nobody has a buy order and none sold in the last 7 days. A pack you list may never sell.'],
+    stale: ['off', 'Not selling', 'Listed, it would pay, but none sold in the last 7 days, and no buy order covers the gems. A pack you list may never sell.'],
   };
   const packJob = { running: false, stop: false, done: 0, total: 0, note: '', error: '', what: 'ranking', draw: () => drawPackStatus() };
   const packView = { sort: 'now', dir: -1 };
@@ -3128,8 +3156,9 @@
 
   // What was looked up, kept in local storage: {gem: {t, bid, ask, cur}, games: {appid: {t,
   // h (the pack's market name), b and a (best buy order, cheapest listing), cb and cs (how many
-  // of each), cur, then for the top rows s7, m7, hc, ht (last week's sales, their median, its
-  // currency, when)}}}. A game with no pack on the market is {t, none}, a failed lookup {t, err}.
+  // of each), cur, then for the top rows and any pack with no buy orders or that pays only if
+  // listed s7, m7, hc, ht (last week's sales, their median, its currency, when), or hx when that
+  // lookup failed}}}. A game with no pack on the market is {t, none}, a failed lookup {t, err}.
   function loadPacks() {
     if (!packData) packData = readJson('sct.packs', null) || { gem: null, games: {} };
     return packData;
@@ -3211,7 +3240,9 @@
         hash = pick;
         ob = await call('/market/orderbook', 'Load', 753, hash);
       }
-      if (!(ob && ob.success && ob.data)) throw new Error('Steam sent no order book for this pack.');
+      // The search lists it, yet Steam answers for its order book as if it did not exist (seen on
+      // 2026-11-28). That is no failed connection, so it does not count towards stopping.
+      if (!(ob && ob.success && ob.data)) return { t: Date.now(), h: hash, err: 'Steam sent no order book for this pack.' };
     }
     const book = ob.data, tops = bookTops(book);
     return { t: Date.now(), h: hash, b: tops.bid || 0, a: tops.ask || 0, cb: book.cBuyOrders || 0, cs: book.cSellOrders || 0, cur: book.eCurrency };
@@ -3264,9 +3295,13 @@
         if (packJob.done % 5 === 0) drawPackTable();
         drawPackStatus();
       }
-      // Last week's sales, for the rows at the top only: each is a much larger lookup.
+      // Last week's sales: for the rows at the top; for every pack nobody has a buy order for,
+      // which is on the market only if some sold; and for every pack that pays only once listed,
+      // which holds only if listed packs sell. Each is a much larger lookup.
       const fees = scanFees(d.gem.cur);
-      const top = rankPacks(games, packRecs(info, d), gemCents(d.gem.bid, fees), fees).filter(x => x.net).slice(0, PACK_TOP)
+      const ranked = rankPacks(games, packRecs(info, d), gemCents(d.gem.bid, fees), fees);
+      const check = ranked.filter(x => x.market && x.market !== 'gone' && (!(x.r.b > 0) || packVerdict(x.net) === 'listed'));
+      const top = [...new Set(ranked.filter(x => x.net).slice(0, PACK_TOP).concat(check))]
         .filter(x => !(x.r.ht && Date.now() - x.r.ht < PACK_FRESH && x.r.hc === d.gem.cur));
       packJob.total += top.length;
       for (const x of top) {
@@ -3274,10 +3309,14 @@
         drawPackStatus();
         try {
           const ph = await lookup(state, () => call('/market/actions', 'QueryPriceHistory', 753, x.r.h));
-          const s = recentSales(apiPoints(ph && ph.prices), 7, Date.now());
-          Object.assign(x.r, { s7: s.units, m7: s.median, hc: ph && ph.ecurrency, ht: Date.now() });
+          // No list of sales at all is a failed lookup, not "none sold": the pack stays unjudged.
+          if (!(ph && Array.isArray(ph.prices))) throw new Error('Steam sent no sales for this pack.');
+          const s = recentSales(apiPoints(ph.prices), 7, Date.now());
+          Object.assign(x.r, { s7: s.units, m7: s.median, hc: ph.ecurrency, ht: Date.now() });
+          delete x.r.hx;
         } catch (e) {
           if (e === STOP || e.fatal) throw e;
+          x.r.hx = e.message;
         }
         packJob.done++;
         drawPacks();
@@ -3340,7 +3379,7 @@
     const n = info.games.length;
     if (!priced) return `${n} of your games can be made into booster packs. Rank them to see which packs are worth more than their gems.`;
     const known = ranked.filter(x => packVerdict(x.net));
-    const of = v => known.filter(x => packVerdict(x.net) === v);
+    const of = v => ranked.filter(x => packTag(x) === v);
     const pays = of('pays'), listed = of('listed'), loses = of('loses');
     // Why a pack cannot be made right now: one a game a day, and only tradable gems make a pack that sells.
     const goo = info.goo;
@@ -3357,14 +3396,32 @@
           : pays.length === 1 ? 'It cannot be made today.' : 'None of them can be made today.');
       }
     } else if (known.length) {
-      parts.push(`None of the ${known.length} packs looked up is worth more than its gems sold to a buy order: selling the gems as Sacks of Gems pays more.`);
+      parts.push(`None of the ${known.length} packs that sell on the market is worth more than its gems sold to a buy order: selling the gems as Sacks of Gems pays more.`);
     }
     if (listed.length) parts.push(`${listed.length} only ${listed.length === 1 ? 'pays' : 'pay'} if listed and bought.`);
     if (loses.length) parts.push(`${loses.length} ${loses.length === 1 ? 'loses' : 'lose'} money either way.`);
-    const none = ranked.filter(x => x.r && x.r.none).length, todo = ranked.filter(x => !x.r).length;
-    if (none) parts.push(`${none} ${none === 1 ? 'has' : 'have'} no packs on the market.`);
+    const count = (...m) => ranked.filter(x => m.includes(x.market)).length;
+    const off = count('gone', 'empty'), unsure = count('unsure'), todo = ranked.filter(x => !x.r).length;
+    const idle = of('unsold').length + of('stale').length;
+    if (off) parts.push(`${off} ${off === 1 ? 'is' : 'are'} not on the market.`);
+    if (idle) parts.push(`${idle} ${idle === 1 ? 'is' : 'are'} listed but not selling: none sold in the last week, and no buy order covers the gems.`);
+    if (unsure) parts.push(`${unsure} ${unsure === 1 ? 'has' : 'have'} no buy orders and still ${unsure === 1 ? 'needs its' : 'need their'} sales looked up.`);
     if (todo) parts.push(`${todo} not looked up yet.`);
     return parts.join(' ');
+  }
+
+  // What a row needs to say about its pack's market, or ''.
+  function marketNote(x) {
+    const { r, market } = x;
+    if (!r) return 'Not looked up yet';
+    if (r.err) return r.err;
+    if (market === 'gone') return 'Steam\'s market has no packs of this game';
+    if (market === 'empty') return 'Nobody selling or buying, none sold in 7 days';
+    if (market === 'unsold') return 'Listed, but no buy orders or sales in 7 days';
+    if (market === 'unsure') return r.hx ? 'No buy orders, sales did not load: Rank again' : 'No buy orders, sales not looked up yet';
+    if (packTag(x) === 'stale') return 'Pays only if listed, but none sold in 7 days';
+    if (r.b > 0) return r.a > 0 ? '' : 'None listed: it sells straight to the buy order';
+    return r.a > 0 ? '' : 'None listed or wanted now, though some sold';
   }
 
   function drawPackTable() {
@@ -3392,30 +3449,31 @@
       text: label + (packView.sort === key && key ? (packView.dir < 0 ? ' ▾' : ' ▴') : ''),
     })));
     const blank = text => el('span', { class: 'sct-dim', text: text || '—' });
-    const signed = (c, tip) => (c == null ? blank()
-      : el('span', { class: c > 0 ? 'sct-ok' : c < 0 ? 'sct-bad' : 'sct-dim', title: tip, text: signedCents(cur, c) }));
+    const signed = (c, tip, dim) => (c == null ? blank()
+      : el('span', { class: dim || !c ? 'sct-dim' : c > 0 ? 'sct-ok' : 'sct-bad', title: tip, text: signedCents(cur, c) }));
     const goo = info.goo;
-    const body = rows.map(({ g, r, net }) => {
-      const v = packVerdict(net), tag = v && VERDICTS[v], book = !!r && !r.err && !r.none;
+    const body = rows.map(x => {
+      const { g, r, net, market } = x;
+      const v = packTag(x), tag = v && VERDICTS[v], book = !!market && market !== 'gone';
       const notes = [];
       if (g.cool) notes.push(g.at ? `Made today, next from ${g.at}` : 'Made today: one pack a game a day');
       if (goo && goo.tradable != null && g.gems > goo.tradable) {
         notes.push(goo.total >= g.gems ? `Needs ${g.gems.toLocaleString()} tradable gems, you have ${Math.floor(goo.tradable).toLocaleString()}`
           : `Needs ${g.gems.toLocaleString()} gems, you have ${Math.floor(goo.total).toLocaleString()}`);
       }
-      if (r && r.none) notes.push('No packs on the market');
-      else if (r && r.err) notes.push(r.err);
-      else if (!r) notes.push('Not looked up yet');
+      const said = marketNote(x);
+      if (said) notes.push(said);
       const cost = net ? ` less ${$(Math.round(net.cost))} of gems` : '';
       return el('tr', { class: g.cool ? 'cool' : '' },
         el('td', { class: 'name', title: g.name },
           el('a', { href: cardUrl((r && r.h) || boosterHash(g.appid, g.name)), target: '_blank', rel: 'noopener', text: g.name }),
-          notes.length ? el('i', { text: notes.join(' · ') }) : null),
+          notes.length ? el('i', { title: notes.join('\n'), text: notes.join(' · ') }) : null),
         el('td', {}, el('b', { text: g.gems.toLocaleString() }), perGem != null ? blank(` ${$(Math.round(g.gems * perGem))}`) : null),
         el('td', {}, book && r.b ? [el('b', { text: $(r.b) }), blank(` ×${r.cb.toLocaleString()}`)] : blank(book ? 'none' : '')),
         el('td', {}, signed(net && net.now, net && net.keepNow != null ? `Keep ${$(net.keepNow)} after fees,${cost}` : '')),
         el('td', {}, book && r.a ? [el('b', { text: $(r.a) }), blank(` ×${r.cs.toLocaleString()}`)] : blank(book ? 'none' : '')),
-        el('td', {}, signed(net && net.listed, net && net.listAt ? `List at ${$(net.listAt)}: keep ${$(net.keepListed)} after fees,${cost}` : '')),
+        el('td', {}, signed(net && net.listed, net && net.listAt ? `List at ${$(net.listAt)}: keep ${$(net.keepListed)} after fees,${cost}` +
+          (v === 'stale' ? '. None sold in the last 7 days.' : '') : '', v === 'stale')),
         el('td', { title: r && r.s7 != null ? `${r.s7} sold in the last 7 days` + (r.m7 && r.hc === cur ? `, half at or under ${$(r.m7)}` : '') : '' },
           r && r.s7 != null ? [el('b', { class: r.s7 ? '' : 'sct-warn', text: r.s7.toLocaleString() }),
             r.m7 && r.hc === cur ? blank(` · ${$(r.m7)}`) : null] : blank()),
@@ -3425,6 +3483,8 @@
     foot.textContent = 'Research only: this never makes, lists or buys a pack. Make one with Steam\'s own button above, then sell it from ' +
       'your inventory. ' + (d.gem ? `Gems count at what a Sack of Gems (${SACK_GEMS.toLocaleString()} gems) fetches sold to its best buy order ` +
       `of ${$(d.gem.bid)}, after fees: ${$(Math.round(perGem * SACK_GEMS))} a sack.` + (d.gem.ask ? ` Buying a sack costs ${$(d.gem.ask)}.` : '') + ' ' : '') +
+      'A pack is ranked only if it sells on the market: someone has a buy order for it, or some sold in the last 7 days. ' +
+      'One that would pay only if listed needs sales in the last 7 days too. ' +
       'Prices are looked up without your Steam sign-in and kept for an hour.';
   }
 
